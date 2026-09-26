@@ -1,0 +1,201 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  HOLDER
+}
+
+enum AccountKind {
+  ASSET
+  CONTRA
+  SINK
+}
+
+enum BatchStatus {
+  DRAFT
+  APPROVED
+  REJECTED
+}
+
+enum LedgerEventType {
+  ISSUANCE
+  TRANSFER
+  RETIREMENT
+  CANCELLATION
+}
+
+enum PostingSide {
+  DEBIT
+  CREDIT
+}
+
+model User {
+  id              String        @id @default(cuid())
+  email           String        @unique
+  name            String
+  passwordHash    String        @map("password_hash")
+  role            Role
+  createdAt       DateTime      @default(now()) @map("created_at")
+  account         Account?
+  draftedBatches  CreditBatch[] @relation("DraftedBatches")
+  approvedBatches CreditBatch[] @relation("ApprovedBatches")
+  rejectedBatches CreditBatch[] @relation("RejectedBatches")
+  projectsCreated Project[]
+  documents       ProjectDocument[]
+  ledgerEvents    LedgerEvent[]
+  auditLogs       AuditLog[]
+
+  @@map("users")
+}
+
+model Account {
+  id        String          @id @default(cuid())
+  code      String          @unique
+  name      String
+  kind      AccountKind
+  userId    String?         @unique @map("user_id")
+  user      User?           @relation(fields: [userId], references: [id])
+  postings  LedgerPosting[]
+  createdAt DateTime        @default(now()) @map("created_at")
+
+  @@map("accounts")
+}
+
+model Project {
+  id                String            @id @default(cuid())
+  code              String            @unique
+  name              String
+  location          String
+  methodology       String
+  standardReference String            @map("standard_reference")
+  description       String
+  createdById       String            @map("created_by_id")
+  createdBy         User              @relation(fields: [createdById], references: [id])
+  createdAt         DateTime          @default(now()) @map("created_at")
+  documents         ProjectDocument[]
+  batches           CreditBatch[]
+  events            LedgerEvent[]
+
+  @@map("projects")
+}
+
+model ProjectDocument {
+  id           String   @id @default(cuid())
+  projectId    String   @map("project_id")
+  project      Project  @relation(fields: [projectId], references: [id])
+  fileName     String   @map("file_name")
+  mimeType     String   @map("mime_type")
+  sizeBytes    Int      @map("size_bytes")
+  content      Bytes
+  uploadedById String   @map("uploaded_by_id")
+  uploadedBy   User     @relation(fields: [uploadedById], references: [id])
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([projectId])
+  @@map("project_documents")
+}
+
+model CreditBatch {
+  id            String      @id @default(cuid())
+  projectId     String      @map("project_id")
+  project       Project     @relation(fields: [projectId], references: [id])
+  vintageYear   Int         @map("vintage_year")
+  quantity      Int
+  methodology   String
+  status        BatchStatus @default(DRAFT)
+  serialStart   Int?        @map("serial_start")
+  serialEnd     Int?        @map("serial_end")
+  draftedById   String      @map("drafted_by_id")
+  draftedBy     User        @relation("DraftedBatches", fields: [draftedById], references: [id])
+  draftedAt     DateTime    @default(now()) @map("drafted_at")
+  approvedById  String?     @map("approved_by_id")
+  approvedBy    User?       @relation("ApprovedBatches", fields: [approvedById], references: [id])
+  approvedAt    DateTime?   @map("approved_at")
+  rejectedById  String?     @map("rejected_by_id")
+  rejectedBy    User?       @relation("RejectedBatches", fields: [rejectedById], references: [id])
+  rejectedAt    DateTime?   @map("rejected_at")
+  rejectionNote String?     @map("rejection_note")
+  seedKey       String?     @unique @map("seed_key")
+  event         LedgerEvent?
+
+  @@index([projectId, status])
+  @@map("credit_batches")
+}
+
+model LedgerEvent {
+  id          String          @id @default(cuid())
+  type        LedgerEventType
+  projectId   String          @map("project_id")
+  project     Project         @relation(fields: [projectId], references: [id])
+  vintageYear Int             @map("vintage_year")
+  actorId     String          @map("actor_id")
+  actor       User            @relation(fields: [actorId], references: [id])
+  memo        String?
+  beneficiary String?
+  reason      String?
+  batchId     String?         @unique @map("batch_id")
+  batch       CreditBatch?    @relation(fields: [batchId], references: [id])
+  recordedAt  DateTime        @default(now()) @map("recorded_at")
+  postings    LedgerPosting[]
+
+  @@index([type, recordedAt])
+  @@index([projectId, vintageYear])
+  @@map("ledger_events")
+}
+
+model LedgerPosting {
+  id          String       @id @default(cuid())
+  seq         BigInt       @unique @default(autoincrement())
+  eventId     String       @map("event_id")
+  event       LedgerEvent  @relation(fields: [eventId], references: [id])
+  accountId   String       @map("account_id")
+  account     Account      @relation(fields: [accountId], references: [id])
+  side        PostingSide
+  projectId   String       @map("project_id")
+  vintageYear Int          @map("vintage_year")
+  serialStart Int          @map("serial_start")
+  serialEnd   Int          @map("serial_end")
+  quantity    Int
+  createdAt   DateTime     @default(now()) @map("created_at")
+
+  @@index([accountId, projectId, vintageYear])
+  @@index([projectId, vintageYear])
+  @@map("ledger_postings")
+}
+
+/// Populated only by a database trigger when credits are issued.
+/// It exists so PostgreSQL can reject overlapping serial ranges.
+/// It is not a balance and it is not updated in place.
+model IssuedSerialRange {
+  id          String @id
+  projectId   String @map("project_id")
+  vintageYear Int    @map("vintage_year")
+  serialStart Int    @map("serial_start")
+  serialEnd   Int    @map("serial_end")
+  postingId   String @unique @map("posting_id")
+
+  @@index([projectId])
+  @@map("issued_serial_ranges")
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?  @map("actor_id")
+  actor      User?    @relation(fields: [actorId], references: [id])
+  action     String
+  entityType String   @map("entity_type")
+  entityId   String   @map("entity_id")
+  detail     Json
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}
