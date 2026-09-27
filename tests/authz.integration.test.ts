@@ -9,16 +9,34 @@ vi.mock("next/navigation", () => ({
   },
 }));
 
+vi.mock("next-auth", () => ({
+  default: () => ({
+    handlers: {},
+    auth: vi.fn(),
+    signIn: vi.fn(),
+    signOut: vi.fn(async () => undefined),
+  }),
+  AuthError: class AuthError extends Error {},
+}));
+
+vi.mock("next-auth/providers/credentials", () => ({
+  default: () => ({}),
+}));
+
 vi.mock("@/auth", () => ({
   auth: vi.fn(),
+  signIn: vi.fn(),
+  signOut: vi.fn(async () => undefined),
 }));
 
 import { auth } from "@/auth";
 import { GET as certificateGet } from "@/app/api/certificates/[eventId]/route";
+import { GET as sweepGet } from "@/app/api/cron/sweep/route";
 import { prisma } from "@/lib/db";
 import { transferAction } from "@/lib/actions/holdings";
 import { retireAction } from "@/lib/actions/retire";
-import { authenticate } from "@/lib/authenticate";
+import { EMAIL_WIDE_AFTER, authenticate, normaliseLoginEmail } from "@/lib/authenticate";
+import { auditEmailHmac } from "@/lib/audit-email";
 import { allowVerificationLookup } from "@/lib/verify";
 import { currentUser } from "@/lib/session";
 import {
@@ -28,6 +46,7 @@ import {
   ensureSystemAccounts,
   transferCredits,
 } from "@/lib/ledger/service";
+import { signOutAction } from "@/lib/actions/auth";
 import { BCRYPT_COST, changePassword } from "@/lib/passwords";
 import { requireAdmin } from "@/lib/session";
 import { ownerPrisma } from "./owner-db";
@@ -195,6 +214,9 @@ describe("authentication and authorisation", () => {
     });
     expect(missingAudits).toHaveLength(1);
     expect(JSON.stringify(missingAudits)).not.toContain(marker);
+    expect(JSON.stringify(missingAudits)).not.toContain("emailSha256");
+    const detail = missingAudits[0]?.detail as { emailHmac?: string };
+    expect(detail.emailHmac).toBe(auditEmailHmac(normaliseLoginEmail(oversized)));
     const storedEmails = await prisma.loginAttempt.findMany({ where: { ip: "203.0.113.5" } });
     expect(storedEmails.every((row) => row.email === "unknown")).toBe(true);
 
@@ -229,6 +251,50 @@ describe("authentication and authorisation", () => {
     expect(await prisma.loginAttempt.count({ where: { email: "auth-holder@test.local" } })).toBe(1);
   });
 
+  it("does not let one IP's failures lock the same account on another IP", async () => {
+    await prisma.loginAttempt.createMany({
+      data: Array.from({ length: 10 }, () => ({ email: "auth-holder@test.local", ip: "203.0.113.9" })),
+    });
+    const fromOtherIp = await authenticate("auth-holder@test.local", "HolderDemo!2026", "203.0.113.50");
+    expect(fromOtherIp?.id).toBe(holderId);
+    await prisma.loginAttempt.deleteMany({ where: { email: "auth-holder@test.local" } });
+    await prisma.loginAttempt.createMany({
+      data: Array.from({ length: EMAIL_WIDE_AFTER }, (_, index) => ({
+        email: "auth-holder@test.local",
+        ip: `198.51.100.${index}`,
+      })),
+    });
+    expect(await authenticate("auth-holder@test.local", "HolderDemo!2026", "203.0.113.77")).toBeNull();
+  });
+
+  it("still compares a password when the account is already in backoff", async () => {
+    await prisma.loginAttempt.create({
+      data: { email: "auth-holder@test.local", ip: "203.0.113.9" },
+    });
+    const limitedStarted = Date.now();
+    expect(await authenticate("auth-holder@test.local", "HolderDemo!2026", "203.0.113.9")).toBeNull();
+    const limitedMs = Date.now() - limitedStarted;
+    const unknownStarted = Date.now();
+    expect(await authenticate("nobody-timing@example.com", "HolderDemo!2026", "203.0.113.61")).toBeNull();
+    const unknownMs = Date.now() - unknownStarted;
+    expect(limitedMs).toBeGreaterThan(40);
+    expect(unknownMs).toBeGreaterThan(40);
+  });
+
+  it("bumps the token version on logout", async () => {
+    await signInAs(holderId, "HOLDER");
+    const before = await prisma.user.findUniqueOrThrow({
+      where: { id: holderId },
+      select: { tokenVersion: true },
+    });
+    await signOutAction();
+    const after = await prisma.user.findUniqueOrThrow({
+      where: { id: holderId },
+      select: { tokenVersion: true },
+    });
+    expect(after.tokenVersion).toBe(before.tokenVersion + 1);
+  });
+
   it("changes a password with one hash and then accepts only the new one", async () => {
     await changePassword(holderId, "HolderDemo!2026", "Replacement!2026");
     await prisma.loginAttempt.deleteMany({ where: { email: "auth-holder@test.local" } });
@@ -260,10 +326,38 @@ describe("authentication and authorisation", () => {
     await changePassword(holderId, "Replacement!2026", "HolderDemo!2026");
   });
 
-  it("caps concurrent verification lookups at the limit", async () => {
-    const ip = "198.51.100.40";
-    const results = await Promise.all(Array.from({ length: 40 }, () => allowVerificationLookup(ip)));
-    expect(results.filter(Boolean)).toHaveLength(30);
-    expect(await prisma.verifyLookup.count({ where: { ip } })).toBe(30);
+  it("stops verification lookups after the limit and treats a busy lock as limited", async () => {
+    const ip = "198.51.100.41";
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      expect(await allowVerificationLookup(ip)).toBe(true);
+    }
+    expect(await allowVerificationLookup(ip)).toBe(false);
+    const burstIp = "198.51.100.40";
+    const results = await Promise.all(Array.from({ length: 40 }, () => allowVerificationLookup(burstIp)));
+    const allowed = results.filter(Boolean).length;
+    expect(allowed).toBeGreaterThanOrEqual(1);
+    expect(allowed).toBeLessThanOrEqual(30);
+    expect(await prisma.verifyLookup.count({ where: { ip: burstIp } })).toBe(allowed);
+  });
+
+  it("requires the cron secret before sweeping old login rows", async () => {
+    process.env.CRON_SECRET = "cron-test-secret";
+    await prisma.loginAttempt.create({
+      data: {
+        email: "old-sweep@example.com",
+        ip: "198.51.100.8",
+        createdAt: new Date(Date.now() - 48 * 60 * 60 * 1000),
+      },
+    });
+    const denied = await sweepGet(new Request("http://localhost/api/cron/sweep"));
+    expect(denied.status).toBe(401);
+    expect(await prisma.loginAttempt.count({ where: { email: "old-sweep@example.com" } })).toBe(1);
+    const allowed = await sweepGet(
+      new Request("http://localhost/api/cron/sweep", {
+        headers: { authorization: "Bearer cron-test-secret" },
+      }),
+    );
+    expect(allowed.status).toBe(200);
+    expect(await prisma.loginAttempt.count({ where: { email: "old-sweep@example.com" } })).toBe(0);
   });
 });

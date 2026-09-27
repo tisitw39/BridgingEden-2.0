@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { SESSION_MAX_AGE_SECONDS, sessionClaims } from "@/auth.config";
 import { clientIp } from "@/lib/authenticate";
 import { documentDownloadHeaders } from "@/lib/documents";
+import { adminEntryRedirect } from "@/lib/admin-gate";
+import { auditEmailHmac } from "@/lib/audit-email";
 import { productionEnvError } from "@/lib/env";
 import { errorText, noticeText } from "@/lib/flash";
 import { pdfText } from "@/lib/pdf-text";
@@ -29,14 +31,27 @@ describe("production environment", () => {
     expect(
       productionEnvError({ NODE_ENV: "production", AUTH_SECRET: "x".repeat(31), AUTH_URL: "https://registry.example" }),
     ).toMatch(/AUTH_SECRET/);
-    expect(productionEnvError({ NODE_ENV: "production", AUTH_SECRET: "x".repeat(32), AUTH_URL: "" })).toMatch(
-      /AUTH_URL/,
-    );
+    expect(
+      productionEnvError({
+        NODE_ENV: "production",
+        AUTH_SECRET: "x".repeat(32),
+        AUTH_URL: "https://registry.example",
+      }),
+    ).toMatch(/AUDIT_EMAIL_HMAC_KEY/);
+    expect(
+      productionEnvError({
+        NODE_ENV: "production",
+        AUTH_SECRET: "x".repeat(32),
+        AUTH_URL: "",
+        AUDIT_EMAIL_HMAC_KEY: "y".repeat(32),
+      }),
+    ).toMatch(/AUTH_URL/);
     expect(
       productionEnvError({
         NODE_ENV: "production",
         AUTH_SECRET: "x".repeat(32),
         AUTH_URL: "http://registry.example",
+        AUDIT_EMAIL_HMAC_KEY: "y".repeat(32),
       }),
     ).toMatch(/https/);
     expect(
@@ -44,9 +59,30 @@ describe("production environment", () => {
         NODE_ENV: "production",
         AUTH_SECRET: "x".repeat(32),
         AUTH_URL: "https://registry.example",
+        AUDIT_EMAIL_HMAC_KEY: "y".repeat(32),
       }),
     ).toBeNull();
     expect(productionEnvError({ NODE_ENV: "development", AUTH_SECRET: "", AUTH_URL: "" })).toBeNull();
+  });
+});
+
+describe("admin middleware gate", () => {
+  it("sends non-admins away from /admin", () => {
+    expect(adminEntryRedirect("/admin", undefined)).toBe("/login");
+    expect(adminEntryRedirect("/admin/issuance", "HOLDER")).toBe("/portfolio");
+    expect(adminEntryRedirect("/admin", "ADMIN")).toBeNull();
+    expect(adminEntryRedirect("/portfolio", "HOLDER")).toBeNull();
+  });
+});
+
+describe("unknown-email audit mac", () => {
+  it("uses HMAC and refuses a missing key", () => {
+    const key = "k".repeat(32);
+    const first = auditEmailHmac("person@example.com", key);
+    expect(first).toBe(auditEmailHmac("person@example.com", key));
+    expect(first).not.toBe(auditEmailHmac("other@example.com", key));
+    expect(first).not.toBe(auditEmailHmac("person@example.com", "m".repeat(32)));
+    expect(() => auditEmailHmac("person@example.com", "")).toThrow(/AUDIT_EMAIL_HMAC_KEY/);
   });
 });
 

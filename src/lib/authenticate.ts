@@ -1,11 +1,13 @@
-import { createHash } from "node:crypto";
 import { compare } from "bcryptjs";
 import { prisma } from "@/lib/db";
+import { tryAdvisoryLock } from "@/lib/advisory-lock";
+import { auditEmailHmac } from "@/lib/audit-email";
 import { DUMMY_PASSWORD_HASH } from "@/lib/passwords";
 
 const WINDOW_MS = 15 * 60 * 1000;
 const MAX_BACKOFF_MS = 15 * 60 * 1000;
-const IP_BACKOFF_AFTER = 30;
+export const EMAIL_WIDE_AFTER = 40;
+export const IP_BACKOFF_AFTER = 30;
 const UNKNOWN_EMAIL = "unknown";
 
 export function normaliseLoginEmail(raw: string): string {
@@ -58,6 +60,15 @@ async function attemptState(
   return { count: rows.length, latest: rows[0]?.createdAt };
 }
 
+type UserSnapshot = {
+  id: string;
+  email: string;
+  name: string;
+  role: "ADMIN" | "HOLDER";
+  tokenVersion: number;
+  passwordHash: string;
+};
+
 export async function authenticate(emailRaw: string, password: string, ip: string) {
   const email = normaliseLoginEmail(emailRaw);
   const safeIp = ip.slice(0, 64) || "unknown";
@@ -65,28 +76,34 @@ export async function authenticate(emailRaw: string, password: string, ip: strin
 
   const decision = await prisma.$transaction(
     async (tx) => {
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`login-ip:${safeIp}`}, 0))::text`;
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`login-email:${email}`}, 0))::text`;
-
       const now = Date.now();
       const since = new Date(now - WINDOW_MS);
+      const ipLocked = await tryAdvisoryLock(tx, `login-ip:${safeIp}`);
+      const emailLocked = ipLocked && (await tryAdvisoryLock(tx, `login-email:${email}`));
+      if (!ipLocked || !emailLocked) {
+        return { limited: true, since, user: null as UserSnapshot | null };
+      }
+
       const user = await tx.user.findUnique({ where: { email } });
-      const bucket = (user ? user.email : UNKNOWN_EMAIL).slice(0, 254);
-      const emailState = await attemptState(
-        tx,
-        user ? { email: bucket } : { email: UNKNOWN_EMAIL, ip: safeIp },
-        since,
-      );
+      const bucket = (user?.email ?? UNKNOWN_EMAIL).slice(0, 254);
+      const pair = await attemptState(tx, { email: bucket, ip: safeIp }, since);
+      const emailWide = await attemptState(tx, { email: bucket }, since);
       const ipState = await attemptState(tx, { ip: safeIp }, since);
-      const emailWait = waitRemaining(emailState.count, emailState.latest, now);
+      const pairWait = waitRemaining(pair.count, pair.latest, now);
+      const emailWideWait =
+        emailWide.count >= EMAIL_WIDE_AFTER
+          ? waitRemaining(emailWide.count - EMAIL_WIDE_AFTER + 1, emailWide.latest, now)
+          : 0;
       const ipWait =
         ipState.count >= IP_BACKOFF_AFTER
           ? waitRemaining(ipState.count - IP_BACKOFF_AFTER + 1, ipState.latest, now)
           : 0;
-      if (emailWait > 0 || ipWait > 0) return { limited: true as const };
-      await tx.loginAttempt.create({ data: { email: bucket, ip: safeIp } });
+      const limited = pairWait > 0 || emailWideWait > 0 || ipWait > 0;
+      if (!limited) {
+        await tx.loginAttempt.create({ data: { email: bucket, ip: safeIp } });
+      }
       return {
-        limited: false as const,
+        limited,
         since,
         user: user
           ? {
@@ -100,14 +117,13 @@ export async function authenticate(emailRaw: string, password: string, ip: strin
           : null,
       };
     },
-    { timeout: 10_000, maxWait: 10_000 },
+    { timeout: 5_000, maxWait: 2_000 },
   );
 
-  if (decision.limited) return null;
-
-  const ok = await compare(password, decision.user?.passwordHash ?? DUMMY_PASSWORD_HASH);
-  if (!decision.user || !ok) {
-    if (decision.user) {
+  // Always one bcrypt compare. A limited request and an unknown email take the same path.
+  const matches = await compare(password, decision.user?.passwordHash ?? DUMMY_PASSWORD_HASH);
+  if (decision.limited || !decision.user || !matches) {
+    if (!decision.limited && decision.user) {
       await prisma.auditLog.create({
         data: {
           actorId: decision.user.id,
@@ -117,7 +133,7 @@ export async function authenticate(emailRaw: string, password: string, ip: strin
           detail: { email: decision.user.email.slice(0, 254), ip: safeIp },
         },
       });
-    } else {
+    } else if (!decision.limited) {
       const already = await prisma.auditLog.findFirst({
         where: {
           action: "auth.login_failed_unknown",
@@ -131,7 +147,7 @@ export async function authenticate(emailRaw: string, password: string, ip: strin
             action: "auth.login_failed_unknown",
             entityType: "User",
             entityId: safeIp,
-            detail: { ip: safeIp, emailSha256: createHash("sha256").update(email).digest("hex") },
+            detail: { ip: safeIp, emailHmac: auditEmailHmac(email) },
           },
         });
       }

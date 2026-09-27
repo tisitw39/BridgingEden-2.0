@@ -615,9 +615,9 @@ describe("ledger database rules", () => {
     expect(pdf).toBeTruthy();
     const document = await PDFDocument.load(pdf!);
     expect(document.getPageCount()).toBeGreaterThan(1);
-    const stored = await prisma.ledgerEvent.findUniqueOrThrow({ where: { id: retired.eventId } });
-    expect(stored.verificationToken).toMatch(/^[a-f0-9]{32}$/);
-    const verified = await loadRetirementByToken(stored.verificationToken!);
+    const stored = await prisma.retirementVerification.findUniqueOrThrow({ where: { eventId: retired.eventId } });
+    expect(stored.token).toMatch(/^[a-f0-9]{32}$/);
+    const verified = await loadRetirementByToken(stored.token);
     expect(verified).toMatchObject({
       status: "Retired",
       projectCode: "CERT",
@@ -627,7 +627,13 @@ describe("ledger database rules", () => {
     });
     expect(verified?.serials[0]).toContain("–");
     expect(await loadRetirementByToken(retired.eventId)).toBeNull();
-    expect((await loadRetirementVerification(retired.eventId))?.verificationToken).toBe(stored.verificationToken);
+    expect((await loadRetirementVerification(retired.eventId))?.verificationToken).toBe(stored.token);
+    await expect(
+      prisma.$executeRaw`UPDATE retirement_verifications SET token = ${"ab".repeat(16)} WHERE event_id = ${retired.eventId}`,
+    ).rejects.toThrow(/permission denied/);
+    await expect(
+      ownerPrisma.$executeRaw`UPDATE retirement_verifications SET token = ${"cd".repeat(16)} WHERE event_id = ${retired.eventId}`,
+    ).rejects.toThrow(/append-only/);
   });
 
   it("rejects a contra issuance that is not tied to an approved batch", async () => {
@@ -736,5 +742,253 @@ describe("ledger database rules", () => {
     await expect(
       ownerPrisma.$executeRaw`UPDATE credit_batches SET rejection_note = 'later' WHERE id = ${batch.id}`,
     ).rejects.toThrow(/frozen/);
+  });
+
+  it("rejects a batch inserted as approved, or approved without an issuance", async () => {
+    const project = await makeProject("DRAFT");
+    await expect(
+      prisma.creditBatch.create({
+        data: {
+          projectId: project.id,
+          vintageYear: 2024,
+          quantity: 5,
+          methodology: "Native Woodland Establishment",
+          status: "APPROVED",
+          serialStart: 1,
+          serialEnd: 5,
+          draftedById: adminId,
+          approvedById: approverId,
+          approvedAt: new Date(),
+        },
+      }),
+    ).rejects.toThrow(/unapproved draft/);
+
+    const batch = await draftBatch({
+      projectId: project.id,
+      vintageYear: 2024,
+      quantity: 5,
+      methodology: "Native Woodland Establishment",
+      actorId: adminId,
+    });
+    await expect(
+      prisma.$executeRaw`
+        UPDATE credit_batches
+        SET status = 'APPROVED',
+            serial_start = 1,
+            serial_end = 5,
+            approved_by_id = ${approverId},
+            approved_at = NOW()
+        WHERE id = ${batch.id}
+      `,
+    ).rejects.toThrow(/issuance event/);
+    const stillDraft = await prisma.creditBatch.findUniqueOrThrow({ where: { id: batch.id } });
+    expect(stillDraft.status).toBe("DRAFT");
+  });
+
+  it("rejects an approved batch whose postings do not match its quantity or serials", async () => {
+    const project = await makeProject("MISMATCH");
+    const inventory = await prisma.account.findUniqueOrThrow({ where: { code: "INVENTORY" } });
+    const issuance = await prisma.account.findUniqueOrThrow({ where: { code: "ISSUANCE" } });
+    const batch = await draftBatch({
+      projectId: project.id,
+      vintageYear: 2024,
+      quantity: 5,
+      methodology: "Native Woodland Establishment",
+      actorId: adminId,
+    });
+    const attempt = (serialStart: number, serialEnd: number) =>
+      prisma.$transaction(async (tx) => {
+        const event = await tx.ledgerEvent.create({
+          data: {
+            type: "ISSUANCE",
+            projectId: project.id,
+            vintageYear: 2024,
+            actorId: approverId,
+            batchId: batch.id,
+          },
+        });
+        const quantity = serialEnd - serialStart + 1;
+        for (const side of ["DEBIT", "CREDIT"] as const) {
+          await tx.ledgerPosting.create({
+            data: {
+              eventId: event.id,
+              accountId: side === "DEBIT" ? inventory.id : issuance.id,
+              side,
+              projectId: project.id,
+              vintageYear: 2024,
+              serialStart,
+              serialEnd,
+              quantity,
+            },
+          });
+        }
+        await tx.creditBatch.update({
+          where: { id: batch.id },
+          data: {
+            status: "APPROVED",
+            serialStart: 1,
+            serialEnd: 5,
+            approvedById: approverId,
+            approvedAt: new Date(),
+          },
+        });
+      });
+    await expect(attempt(1, 4)).rejects.toThrow(/do not match the approved batch/);
+    await expect(attempt(2, 6)).rejects.toThrow(/do not match the approved batch/);
+    expect(await prisma.issuedSerialRange.count()).toBe(0);
+  });
+
+  it("rejects an issuance whose actor is not the approving admin", async () => {
+    const project = await makeProject("ACTOR");
+    const inventory = await prisma.account.findUniqueOrThrow({ where: { code: "INVENTORY" } });
+    const issuance = await prisma.account.findUniqueOrThrow({ where: { code: "ISSUANCE" } });
+    const batch = await draftBatch({
+      projectId: project.id,
+      vintageYear: 2024,
+      quantity: 2,
+      methodology: "Native Woodland Establishment",
+      actorId: adminId,
+    });
+    await expect(
+      prisma.$transaction(async (tx) => {
+        const event = await tx.ledgerEvent.create({
+          data: {
+            type: "ISSUANCE",
+            projectId: project.id,
+            vintageYear: 2024,
+            actorId: adminId,
+            batchId: batch.id,
+          },
+        });
+        for (const side of ["DEBIT", "CREDIT"] as const) {
+          await tx.ledgerPosting.create({
+            data: {
+              eventId: event.id,
+              accountId: side === "DEBIT" ? inventory.id : issuance.id,
+              side,
+              projectId: project.id,
+              vintageYear: 2024,
+              serialStart: 1,
+              serialEnd: 2,
+              quantity: 2,
+            },
+          });
+        }
+        await tx.creditBatch.update({
+          where: { id: batch.id },
+          data: {
+            status: "APPROVED",
+            serialStart: 1,
+            serialEnd: 2,
+            approvedById: approverId,
+            approvedAt: new Date(),
+          },
+        });
+      }),
+    ).rejects.toThrow(/issuance actor must be the batch approver/);
+
+    await expect(
+      prisma.$transaction(async (tx) => {
+        const event = await tx.ledgerEvent.create({
+          data: {
+            type: "ISSUANCE",
+            projectId: project.id,
+            vintageYear: 2024,
+            actorId: holderId,
+            batchId: batch.id,
+          },
+        });
+        for (const side of ["DEBIT", "CREDIT"] as const) {
+          await tx.ledgerPosting.create({
+            data: {
+              eventId: event.id,
+              accountId: side === "DEBIT" ? inventory.id : issuance.id,
+              side,
+              projectId: project.id,
+              vintageYear: 2024,
+              serialStart: 1,
+              serialEnd: 2,
+              quantity: 2,
+            },
+          });
+        }
+        await tx.creditBatch.update({
+          where: { id: batch.id },
+          data: {
+            status: "APPROVED",
+            serialStart: 1,
+            serialEnd: 2,
+            approvedById: holderId,
+            approvedAt: new Date(),
+          },
+        });
+      }),
+    ).rejects.toThrow(/batch approver must be an admin/);
+  });
+
+  it("rejects a contra credit or debit on a transfer", async () => {
+    const project = await makeProject("CONTRA");
+    const issuance = await prisma.account.findUniqueOrThrow({ where: { code: "ISSUANCE" } });
+    await expect(
+      prisma.$transaction(async (tx) => {
+        const event = await tx.ledgerEvent.create({
+          data: {
+            type: "TRANSFER",
+            projectId: project.id,
+            vintageYear: 2024,
+            actorId: adminId,
+          },
+        });
+        await tx.ledgerPosting.create({
+          data: {
+            eventId: event.id,
+            accountId: holderAccountId,
+            side: "DEBIT",
+            projectId: project.id,
+            vintageYear: 2024,
+            serialStart: 1,
+            serialEnd: 1,
+            quantity: 1,
+          },
+        });
+        await tx.ledgerPosting.create({
+          data: {
+            eventId: event.id,
+            accountId: issuance.id,
+            side: "CREDIT",
+            projectId: project.id,
+            vintageYear: 2024,
+            serialStart: 1,
+            serialEnd: 1,
+            quantity: 1,
+          },
+        });
+      }),
+    ).rejects.toThrow(/contra credit is only allowed on an issuance/);
+
+    await expect(
+      prisma.$transaction(async (tx) => {
+        const event = await tx.ledgerEvent.create({
+          data: {
+            type: "TRANSFER",
+            projectId: project.id,
+            vintageYear: 2024,
+            actorId: adminId,
+          },
+        });
+        await tx.ledgerPosting.create({
+          data: {
+            eventId: event.id,
+            accountId: issuance.id,
+            side: "DEBIT",
+            projectId: project.id,
+            vintageYear: 2024,
+            serialStart: 1,
+            serialEnd: 1,
+            quantity: 1,
+          },
+        });
+      }),
+    ).rejects.toThrow(/only be debited by an issuance/);
   });
 });

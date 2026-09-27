@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { LoginForm } from "@/components/login-form";
+import { DEMO_ADMIN_PASSWORD, DEMO_HOLDER_PASSWORD, DEMO_USER_EMAILS } from "@/lib/demo-seed";
 
 export const metadata: Metadata = { title: "Login" };
 
@@ -25,9 +26,15 @@ export default async function LoginPage({
       {process.env.NODE_ENV !== "production" ? (
         <div className="mt-8 w-full rounded-2xl border border-line bg-pale p-4 text-sm text-muted">
           <p className="font-mono text-[11px] uppercase tracking-[0.14em] text-forest">Local demo</p>
-          <p className="mt-2">Staff: admin@bridgingeden.ie · EdenAdmin!2026</p>
-          <p>Approver: ciara.nolan@bridgingeden.ie · EdenAdmin!2026</p>
-          <p>Holder: aoife.brennan@example.com · HolderDemo!2026</p>
+          <p className="mt-2">
+            Staff: {DEMO_USER_EMAILS[0]} · {DEMO_ADMIN_PASSWORD}
+          </p>
+          <p>
+            Approver: {DEMO_USER_EMAILS[1]} · {DEMO_ADMIN_PASSWORD}
+          </p>
+          <p>
+            Holder: {DEMO_USER_EMAILS[2]} · {DEMO_HOLDER_PASSWORD}
+          </p>
         </div>
       ) : null}
     </div>

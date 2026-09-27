@@ -1,7 +1,13 @@
 import "dotenv/config";
 import { hash } from "bcryptjs";
 import { PrismaClient, type Role } from "@prisma/client";
-import { DEMO_USER_EMAILS, demoSeedEnvError, nonDemoUserError } from "../src/lib/demo-seed";
+import {
+  DEMO_ADMIN_PASSWORD,
+  DEMO_HOLDER_PASSWORD,
+  DEMO_USER_EMAILS,
+  demoSeedEnvError,
+  emptyUsersError,
+} from "../src/lib/demo-seed";
 import { BCRYPT_COST } from "../src/lib/passwords";
 import { prisma } from "../src/lib/db";
 import {
@@ -41,42 +47,35 @@ async function main() {
   if (!process.env.DIRECT_URL) {
     throw new Error("DIRECT_URL is required so the seed can create admin users as the owner role.");
   }
-  const strangers = await owner.user.count({
-    where: { email: { notIn: [...DEMO_USER_EMAILS] } },
-  });
-  const strangerError = nonDemoUserError(strangers);
-  if (strangerError) throw new Error(strangerError);
+  const userCount = await owner.user.count();
+  const emptyError = emptyUsersError(userCount);
+  if (emptyError) throw new Error(emptyError);
   await ensureSystemAccounts();
+  const [adminEmail, approverEmail, aoifeEmail, liamEmail] = DEMO_USER_EMAILS;
   const admin = await upsertUser({
-    email: "admin@bridgingeden.ie",
+    email: adminEmail,
     name: "Bridging Eden Registry",
-    password: "EdenAdmin!2026",
+    password: DEMO_ADMIN_PASSWORD,
     role: "ADMIN",
   });
   const approver = await upsertUser({
-    email: "ciara.nolan@bridgingeden.ie",
+    email: approverEmail,
     name: "Ciara Nolan",
-    password: "EdenAdmin!2026",
+    password: DEMO_ADMIN_PASSWORD,
     role: "ADMIN",
   });
   const aoife = await upsertUser({
-    email: "aoife.brennan@example.com",
+    email: aoifeEmail,
     name: "Aoife Brennan",
-    password: "HolderDemo!2026",
+    password: DEMO_HOLDER_PASSWORD,
     role: "HOLDER",
   });
   const liam = await upsertUser({
-    email: "liam.oconnell@example.com",
+    email: liamEmail,
     name: "Liam O'Connell",
-    password: "HolderDemo!2026",
+    password: DEMO_HOLDER_PASSWORD,
     role: "HOLDER",
   });
-
-  const existing = await prisma.project.findUnique({ where: { code: "GLEN" } });
-  if (existing) {
-    console.log("Seed projects already exist. Demo passwords were refreshed.");
-    return;
-  }
 
   const glen = await prisma.project.create({
     data: {
@@ -172,10 +171,10 @@ async function main() {
   });
 
   console.log("Seeded Bridging Eden demo data.");
-  console.log("Admin    admin@bridgingeden.ie / EdenAdmin!2026");
-  console.log("Approver ciara.nolan@bridgingeden.ie / EdenAdmin!2026");
-  console.log("Holder   aoife.brennan@example.com / HolderDemo!2026");
-  console.log("Holder   liam.oconnell@example.com / HolderDemo!2026");
+  console.log(`Admin    ${adminEmail} / ${DEMO_ADMIN_PASSWORD}`);
+  console.log(`Approver ${approverEmail} / ${DEMO_ADMIN_PASSWORD}`);
+  console.log(`Holder   ${aoifeEmail} / ${DEMO_HOLDER_PASSWORD}`);
+  console.log(`Holder   ${liamEmail} / ${DEMO_HOLDER_PASSWORD}`);
 }
 
 function glenNote() {

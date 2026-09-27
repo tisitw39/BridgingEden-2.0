@@ -6,16 +6,11 @@ export async function register() {
     if (process.env.NODE_ENV !== "production") return;
 
     const { prisma } = await import("@/lib/db");
-    const { runtimeRoleProblem } = await import("@/lib/db-role");
+    const { disabledGuardTriggerProblem, runtimeRoleProblem } = await import("@/lib/db-role");
     const problem = await runtimeRoleProblem(prisma);
     if (problem) throw new Error(problem);
-
-    const { sweepExpiredAttempts } = await import("@/lib/retention");
-    const sweep = () => {
-      sweepExpiredAttempts().catch(() => undefined);
-    };
-    sweep();
-    setInterval(sweep, 60 * 60 * 1000).unref();
+    const triggers = await disabledGuardTriggerProblem(prisma);
+    if (triggers) throw new Error(triggers);
   } catch (error) {
     console.error(error);
     process.exit(1);

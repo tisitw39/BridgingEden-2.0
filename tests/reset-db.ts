@@ -16,6 +16,7 @@ export async function resetTransactionalData() {
       audit_logs,
       issued_serial_ranges,
       ledger_postings,
+      retirement_verifications,
       ledger_events,
       login_attempts,
       verify_lookups,

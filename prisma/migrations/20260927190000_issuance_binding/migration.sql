@@ -1,20 +1,25 @@
 -- Bind issuance to an approved batch, freeze batches, column-level grants,
 -- session token versions, and public verification tokens.
+--
+-- Verification tokens live in retirement_verifications. This migration does not
+-- update ledger_events. The append-only trigger on the journal stays enabled.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 ALTER TABLE "users" ADD COLUMN "token_version" INTEGER NOT NULL DEFAULT 0;
 
-ALTER TABLE "ledger_events" ADD COLUMN "verification_token" TEXT;
-CREATE UNIQUE INDEX "ledger_events_verification_token_key" ON "ledger_events"("verification_token");
+CREATE TABLE "retirement_verifications" (
+    "event_id" TEXT NOT NULL,
+    "token" TEXT NOT NULL,
+    CONSTRAINT "retirement_verifications_pkey" PRIMARY KEY ("event_id"),
+    CONSTRAINT "retirement_verifications_token_key" UNIQUE ("token"),
+    CONSTRAINT "retirement_verifications_event_id_fkey"
+      FOREIGN KEY ("event_id") REFERENCES "ledger_events"("id")
+);
 
--- Existing retirements are append-only, so the owner disables that one trigger
--- for this backfill and turns it back on before the migration commits.
-ALTER TABLE "ledger_events" DISABLE TRIGGER "ledger_events_append_only";
-UPDATE "ledger_events"
-SET "verification_token" = encode(gen_random_bytes(16), 'hex')
-WHERE "type" = 'RETIREMENT' AND "verification_token" IS NULL;
-ALTER TABLE "ledger_events" ENABLE TRIGGER "ledger_events_append_only";
+CREATE TRIGGER retirement_verifications_append_only
+BEFORE UPDATE OR DELETE ON retirement_verifications
+FOR EACH ROW EXECUTE FUNCTION reject_ledger_mutation();
 
 ALTER TABLE "credit_batches"
   ADD CONSTRAINT "credit_batches_four_eyes"
@@ -49,7 +54,34 @@ CREATE TRIGGER credit_batches_freeze_nondraft
 BEFORE UPDATE ON credit_batches
 FOR EACH ROW EXECUTE FUNCTION credit_batches_freeze();
 
-CREATE OR REPLACE FUNCTION assert_event_issuance(event_id text) RETURNS void
+-- A new batch is a draft. Approval, rejection, and serials are filled in later,
+-- in the same transaction as the issuance event.
+CREATE OR REPLACE FUNCTION credit_batches_insert_draft_only() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+  IF NEW.status IS DISTINCT FROM 'DRAFT'
+     OR NEW.serial_start IS NOT NULL
+     OR NEW.serial_end IS NOT NULL
+     OR NEW.approved_by_id IS NOT NULL
+     OR NEW.approved_at IS NOT NULL
+     OR NEW.rejected_by_id IS NOT NULL
+     OR NEW.rejected_at IS NOT NULL
+     OR NEW.rejection_note IS NOT NULL THEN
+    RAISE EXCEPTION 'a new credit batch must be an unapproved draft';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER credit_batches_insert_draft_only
+BEFORE INSERT ON credit_batches
+FOR EACH ROW EXECUTE FUNCTION credit_batches_insert_draft_only();
+
+-- The argument is target_event, not event_id: ledger_postings.event_id would
+-- otherwise hide the argument inside this function.
+CREATE OR REPLACE FUNCTION assert_event_issuance(target_event text) RETURNS void
 LANGUAGE plpgsql
 SET search_path = pg_catalog, public
 AS $$
@@ -58,31 +90,31 @@ DECLARE
   ev_batch text;
   ev_project text;
   ev_vintage integer;
+  ev_actor text;
   batch_status "BatchStatus";
   batch_qty integer;
   batch_start integer;
   batch_end integer;
   batch_project text;
   batch_vintage integer;
+  batch_approved_by text;
+  approver_role "Role";
   contra_qty bigint;
   contra_ranges int8multirange;
 BEGIN
-  SELECT type, batch_id, project_id, vintage_year
-    INTO ev_type, ev_batch, ev_project, ev_vintage
-  FROM ledger_events WHERE id = event_id;
+  SELECT type, batch_id, project_id, vintage_year, actor_id
+    INTO ev_type, ev_batch, ev_project, ev_vintage, ev_actor
+  FROM ledger_events WHERE id = target_event;
 
-  IF ev_type IS NULL THEN
-    RAISE EXCEPTION 'issuance requires an approved credit batch';
-  END IF;
-  IF ev_type <> 'ISSUANCE' THEN
-    RAISE EXCEPTION 'issuance requires an approved credit batch';
+  IF ev_type IS NULL OR ev_type <> 'ISSUANCE' THEN
+    RAISE EXCEPTION 'a contra credit is only allowed on an issuance';
   END IF;
   IF ev_batch IS NULL THEN
     RAISE EXCEPTION 'issuance requires an approved credit batch';
   END IF;
 
-  SELECT status, quantity, serial_start, serial_end, project_id, vintage_year
-    INTO batch_status, batch_qty, batch_start, batch_end, batch_project, batch_vintage
+  SELECT status, quantity, serial_start, serial_end, project_id, vintage_year, approved_by_id
+    INTO batch_status, batch_qty, batch_start, batch_end, batch_project, batch_vintage, batch_approved_by
   FROM credit_batches WHERE id = ev_batch;
 
   IF batch_status IS DISTINCT FROM 'APPROVED'
@@ -93,13 +125,22 @@ BEGIN
     RAISE EXCEPTION 'issuance requires an approved credit batch';
   END IF;
 
+  IF ev_actor IS DISTINCT FROM batch_approved_by THEN
+    RAISE EXCEPTION 'the issuance actor must be the batch approver';
+  END IF;
+
+  SELECT role INTO approver_role FROM users WHERE id = batch_approved_by;
+  IF approver_role IS DISTINCT FROM 'ADMIN' THEN
+    RAISE EXCEPTION 'the batch approver must be an admin';
+  END IF;
+
   SELECT
     COALESCE(SUM(p.quantity), 0),
     COALESCE(range_agg(int8range(p.serial_start, p.serial_end, '[]')), int8multirange())
   INTO contra_qty, contra_ranges
   FROM ledger_postings p
   JOIN accounts a ON a.id = p.account_id
-  WHERE p.event_id = event_id
+  WHERE p.event_id = target_event
     AND p.side = 'CREDIT'
     AND a.kind = 'CONTRA';
 
@@ -142,6 +183,50 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION assert_approved_batch_has_issuance() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+  issuance_event text;
+BEGIN
+  IF NEW.status IS DISTINCT FROM 'APPROVED' THEN
+    RETURN NULL;
+  END IF;
+  SELECT id INTO issuance_event
+  FROM ledger_events
+  WHERE batch_id = NEW.id AND type = 'ISSUANCE';
+  IF issuance_event IS NULL THEN
+    RAISE EXCEPTION 'an approved batch requires its issuance event';
+  END IF;
+  PERFORM assert_event_issuance(issuance_event);
+  RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION reject_contra_debit_off_issuance() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+  acct_kind "AccountKind";
+  ev_type "LedgerEventType";
+BEGIN
+  IF NEW.side IS DISTINCT FROM 'DEBIT' THEN
+    RETURN NEW;
+  END IF;
+  SELECT kind INTO acct_kind FROM accounts WHERE id = NEW.account_id;
+  IF acct_kind IS DISTINCT FROM 'CONTRA' THEN
+    RETURN NEW;
+  END IF;
+  SELECT type INTO ev_type FROM ledger_events WHERE id = NEW.event_id;
+  IF ev_type IS DISTINCT FROM 'ISSUANCE' THEN
+    RAISE EXCEPTION 'a contra account can only be debited by an issuance';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
 CREATE CONSTRAINT TRIGGER issuance_posting_requires_batch
 AFTER INSERT ON ledger_postings
 DEFERRABLE INITIALLY DEFERRED
@@ -152,8 +237,20 @@ AFTER INSERT ON ledger_events
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION assert_issuance_event_backed();
 
+CREATE CONSTRAINT TRIGGER approved_batch_requires_issuance
+AFTER UPDATE ON credit_batches
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION assert_approved_batch_has_issuance();
+
+CREATE TRIGGER contra_debit_requires_issuance
+BEFORE INSERT ON ledger_postings
+FOR EACH ROW EXECUTE FUNCTION reject_contra_debit_off_issuance();
+
 REVOKE ALL ON TABLE verify_lookups FROM PUBLIC;
 GRANT SELECT, INSERT, DELETE ON TABLE verify_lookups TO bridgingeden_app;
+
+REVOKE ALL ON TABLE retirement_verifications FROM PUBLIC;
+GRANT SELECT, INSERT ON TABLE retirement_verifications TO bridgingeden_app;
 
 REVOKE UPDATE ON TABLE credit_batches FROM bridgingeden_app;
 GRANT UPDATE (

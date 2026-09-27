@@ -1,4 +1,4 @@
-import type { PrismaClient } from "@prisma/client";
+import { Prisma, type PrismaClient } from "@prisma/client";
 
 type RoleRow = {
   login: string;
@@ -35,4 +35,35 @@ export async function runtimeRoleProblem(client: Pick<PrismaClient, "$queryRaw">
   if (row.owner_member) return "The application database role must not be a member of bridgingeden_owner.";
   if (row.owns_ledger) return "The application database role must not own ledger tables.";
   return null;
+}
+
+export const GUARD_TRIGGERS = [
+  "ledger_events_append_only",
+  "ledger_postings_append_only",
+  "issued_serial_ranges_append_only",
+  "audit_logs_append_only",
+  "retirement_verifications_append_only",
+  "ledger_events_no_truncate",
+  "ledger_postings_no_truncate",
+  "issued_serial_ranges_no_truncate",
+  "audit_logs_no_truncate",
+] as const;
+
+export async function disabledGuardTriggerProblem(
+  client: Pick<PrismaClient, "$queryRaw">,
+): Promise<string | null> {
+  const names = Prisma.join([...GUARD_TRIGGERS]);
+  const rows = await client.$queryRaw<{ tgname: string; tgenabled: string }[]>`
+    SELECT t.tgname, t.tgenabled::text AS tgenabled
+    FROM pg_trigger t
+    JOIN pg_class c ON c.oid = t.tgrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND NOT t.tgisinternal
+      AND t.tgname IN (${names})
+  `;
+  const enabled = new Map(rows.map((row) => [row.tgname, row.tgenabled.trim()]));
+  const disabled = GUARD_TRIGGERS.filter((name) => enabled.get(name) !== "O");
+  if (disabled.length === 0) return null;
+  return `Append-only and truncate-guard triggers must be enabled: ${disabled.join(", ")}.`;
 }

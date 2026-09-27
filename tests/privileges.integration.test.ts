@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { prisma } from "@/lib/db";
-import { runtimeRoleProblem } from "@/lib/db-role";
+import { disabledGuardTriggerProblem, runtimeRoleProblem } from "@/lib/db-role";
 import { ensureSystemAccounts } from "@/lib/ledger/service";
 import { ownerPrisma } from "./owner-db";
 
@@ -32,6 +32,17 @@ describe("runtime database role", () => {
     expect(flags.rolcreaterole).toBe(false);
     expect(await runtimeRoleProblem(prisma)).toBeNull();
     expect(await runtimeRoleProblem(ownerPrisma)).toMatch(/bridgingeden_owner|ledger tables/);
+    expect(await disabledGuardTriggerProblem(prisma)).toBeNull();
+  });
+
+  it("reports an append-only trigger that is not enabled", async () => {
+    await ownerPrisma.$executeRawUnsafe(`ALTER TABLE ledger_events DISABLE TRIGGER ledger_events_append_only`);
+    try {
+      expect(await disabledGuardTriggerProblem(prisma)).toMatch(/ledger_events_append_only/);
+    } finally {
+      await ownerPrisma.$executeRawUnsafe(`ALTER TABLE ledger_events ENABLE TRIGGER ledger_events_append_only`);
+    }
+    expect(await disabledGuardTriggerProblem(prisma)).toBeNull();
   });
 
   it("cannot truncate, disable triggers, change account kind, or replicate as the app", async () => {
@@ -55,7 +66,7 @@ describe("runtime database role", () => {
   it("still blocks the owner from truncating until the truncate trigger is disabled", async () => {
     await expect(
       ownerPrisma.$executeRawUnsafe(
-        "TRUNCATE TABLE ledger_events, ledger_postings, issued_serial_ranges, audit_logs",
+        "TRUNCATE TABLE retirement_verifications, ledger_events, ledger_postings, issued_serial_ranges, audit_logs",
       ),
     ).rejects.toThrow(/append-only/);
     const [account] = await prisma.$queryRaw<{ kind: string }[]>`

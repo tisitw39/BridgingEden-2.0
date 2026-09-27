@@ -1,9 +1,12 @@
 export const DEMO_USER_EMAILS = [
-  "admin@bridgingeden.ie",
-  "ciara.nolan@bridgingeden.ie",
+  "admin@example.com",
+  "ciara.nolan@example.com",
   "aoife.brennan@example.com",
   "liam.oconnell@example.com",
 ] as const;
+
+export const DEMO_ADMIN_PASSWORD = "EdenAdmin!2026";
+export const DEMO_HOLDER_PASSWORD = "HolderDemo!2026";
 
 export function demoSeedEnvError(env: { NODE_ENV?: string; ALLOW_DEMO_SEED?: string }): string | null {
   if (env.NODE_ENV === "production") return "Refusing to seed while NODE_ENV=production.";
@@ -11,7 +14,7 @@ export function demoSeedEnvError(env: { NODE_ENV?: string; ALLOW_DEMO_SEED?: str
   return null;
 }
 
-export function nonDemoUserError(count: number): string | null {
-  if (count > 0) return "Refusing to seed because non-demo users exist.";
+export function emptyUsersError(count: number): string | null {
+  if (count > 0) return "Refusing to seed because the users table is not empty.";
   return null;
 }

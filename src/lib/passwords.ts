@@ -10,6 +10,13 @@ export const BCRYPT_COST = 12;
 export const DUMMY_PASSWORD_HASH =
   "$2b$12$9nX.rYI4iaLytIRJnl2/ded7ZkJmea3adighS4Sw85aTnqHXuiEsm";
 
+export async function revokeSessions(userId: string) {
+  await prisma.user.update({
+    where: { id: userId },
+    data: { tokenVersion: { increment: 1 } },
+  });
+}
+
 export async function changePassword(userId: string, currentPassword: string, newPassword: string) {
   if (newPassword.length < 8 || newPassword.length > LIMITS.password) {
     throw new LedgerError("Use a password of 8 to 200 characters.", "INVALID");

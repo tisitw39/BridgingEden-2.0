@@ -5,7 +5,7 @@ import { z } from "zod";
 import { signIn, signOut } from "@/auth";
 import { errorCode, flashRedirect, isRedirectError } from "@/lib/http";
 import { LIMITS } from "@/lib/limits";
-import { changePassword } from "@/lib/passwords";
+import { changePassword, revokeSessions } from "@/lib/passwords";
 import { LedgerError } from "@/lib/ledger/errors";
 import { prisma } from "@/lib/db";
 import { requireUser } from "@/lib/session";
@@ -51,6 +51,8 @@ export async function loginAction(_prev: LoginState, formData: FormData): Promis
 }
 
 export async function signOutAction() {
+  const user = await requireUser();
+  await revokeSessions(user.id);
   await signOut({ redirectTo: "/" });
 }
 

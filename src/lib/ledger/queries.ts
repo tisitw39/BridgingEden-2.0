@@ -96,6 +96,7 @@ export async function listEvents(filters: {
     include: {
       actor: { select: { name: true, email: true } },
       project: { select: { code: true, name: true } },
+      verification: { select: { token: true } },
       postings: {
         include: { account: { select: { name: true, code: true, kind: true } } },
         orderBy: { seq: "asc" },

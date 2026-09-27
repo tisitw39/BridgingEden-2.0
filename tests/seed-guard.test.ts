@@ -34,7 +34,7 @@ describe("demo seed", () => {
     expect(() => execSync("npx tsx prisma/seed.ts", { encoding: "utf8", env })).toThrow(/ALLOW_DEMO_SEED/);
   });
 
-  it("refuses to run when a non-demo user exists", async () => {
+  it("refuses to run when the users table is not empty", async () => {
     await ownerPrisma.user.upsert({
       where: { email: "stranger-seed-guard@example.com" },
       update: {},
@@ -50,6 +50,6 @@ describe("demo seed", () => {
         encoding: "utf8",
         env: { ...process.env, NODE_ENV: "development", ALLOW_DEMO_SEED: "1" },
       }),
-    ).toThrow(/non-demo users/);
+    ).toThrow(/users table is not empty/);
   });
 });

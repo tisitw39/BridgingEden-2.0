@@ -142,15 +142,24 @@ model LedgerEvent {
   memo        String?
   beneficiary String?
   reason      String?
-  batchId             String?         @unique @map("batch_id")
-  batch               CreditBatch?    @relation(fields: [batchId], references: [id])
-  verificationToken   String?         @unique @map("verification_token")
-  recordedAt          DateTime        @default(now()) @map("recorded_at")
-  postings    LedgerPosting[]
+  batchId      String?                 @unique @map("batch_id")
+  batch        CreditBatch?            @relation(fields: [batchId], references: [id])
+  verification RetirementVerification?
+  recordedAt   DateTime                @default(now()) @map("recorded_at")
+  postings     LedgerPosting[]
 
   @@index([type, recordedAt])
   @@index([projectId, vintageYear])
   @@map("ledger_events")
+}
+
+/// One public token per retirement. The journal row is never updated to store it.
+model RetirementVerification {
+  eventId String      @id @map("event_id")
+  token   String      @unique
+  event   LedgerEvent @relation(fields: [eventId], references: [id])
+
+  @@map("retirement_verifications")
 }
 
 model LedgerPosting {

@@ -190,9 +190,13 @@ async function postMove(
       beneficiary: input.beneficiary,
       reason: input.reason,
       batchId: input.batchId,
-      verificationToken: input.type === "RETIREMENT" ? randomBytes(16).toString("hex") : null,
     },
   });
+  if (input.type === "RETIREMENT") {
+    await tx.retirementVerification.create({
+      data: { eventId: event.id, token: randomBytes(16).toString("hex") },
+    });
+  }
   for (const range of input.ranges) {
     await addPosting(tx, {
       eventId: event.id,

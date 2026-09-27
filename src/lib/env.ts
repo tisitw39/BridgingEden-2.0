@@ -11,15 +11,24 @@ export type ProductionEnv = {
   NODE_ENV?: string;
   AUTH_SECRET?: string;
   AUTH_URL?: string;
+  AUDIT_EMAIL_HMAC_KEY?: string;
 };
+
+function secretError(name: string, value: string | undefined): string | null {
+  const secret = value ?? "";
+  const bytes = new TextEncoder().encode(secret).length;
+  if (PLACEHOLDER_SECRETS.has(secret) || bytes < 32) {
+    return `${name} must be a unique value of at least 32 bytes in production.`;
+  }
+  return null;
+}
 
 export function productionEnvError(env: ProductionEnv = process.env): string | null {
   if (env.NODE_ENV !== "production") return null;
-  const secret = env.AUTH_SECRET ?? "";
-  const bytes = new TextEncoder().encode(secret).length;
-  if (PLACEHOLDER_SECRETS.has(secret) || bytes < 32) {
-    return "AUTH_SECRET must be a unique value of at least 32 bytes in production.";
-  }
+  const secret = secretError("AUTH_SECRET", env.AUTH_SECRET);
+  if (secret) return secret;
+  const hmac = secretError("AUDIT_EMAIL_HMAC_KEY", env.AUDIT_EMAIL_HMAC_KEY);
+  if (hmac) return hmac;
   const url = env.AUTH_URL ?? "";
   try {
     const parsed = new URL(url);

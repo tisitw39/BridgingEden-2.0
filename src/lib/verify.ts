@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { tryAdvisoryLock } from "@/lib/advisory-lock";
 import { formatSerialRange } from "@/lib/format";
 
 const TOKEN = /^[a-f0-9]{32}$/;
@@ -24,7 +25,7 @@ type EventWithProject = {
   vintageYear: number;
   beneficiary: string | null;
   recordedAt: Date;
-  verificationToken: string | null;
+  verification: { token: string } | null;
   project: { name: string; code: string };
   postings: { side: string; serialStart: number; serialEnd: number; quantity: number }[];
 };
@@ -35,11 +36,11 @@ export function verificationUrl(token: string): string {
 }
 
 function toRecord(event: EventWithProject): RetirementVerification | null {
-  if (event.type !== "RETIREMENT" || !event.verificationToken) return null;
+  if (event.type !== "RETIREMENT" || !event.verification) return null;
   const ranges = event.postings.filter((posting) => posting.side === "CREDIT");
   return {
     eventId: event.id,
-    verificationToken: event.verificationToken,
+    verificationToken: event.verification.token,
     projectName: event.project.name,
     projectCode: event.project.code,
     vintageYear: event.vintageYear,
@@ -55,6 +56,7 @@ function toRecord(event: EventWithProject): RetirementVerification | null {
 
 const eventInclude = {
   project: true,
+  verification: true,
   postings: { orderBy: { seq: "asc" as const } },
 };
 
@@ -70,18 +72,19 @@ export async function loadRetirementVerification(eventId: string): Promise<Retir
 
 export async function loadRetirementByToken(token: string): Promise<RetirementVerification | null> {
   if (!TOKEN.test(token)) return null;
-  const event = await prisma.ledgerEvent.findUnique({
-    where: { verificationToken: token },
-    include: eventInclude,
+  const row = await prisma.retirementVerification.findUnique({
+    where: { token },
+    include: { event: { include: eventInclude } },
   });
-  if (!event) return null;
-  return toRecord(event);
+  if (!row?.event) return null;
+  return toRecord(row.event);
 }
 
 export async function allowVerificationLookup(ip: string): Promise<boolean> {
   const safeIp = ip.slice(0, 64) || "unknown";
   return prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`verify:${safeIp}`}, 0))::text`;
+    const locked = await tryAdvisoryLock(tx, `verify:${safeIp}`);
+    if (!locked) return false;
     const since = new Date(Date.now() - VERIFY_WINDOW_MS);
     const count = await tx.verifyLookup.count({ where: { ip: safeIp, createdAt: { gte: since } } });
     if (count >= VERIFY_LIMIT) return false;
