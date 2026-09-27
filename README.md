@@ -19,11 +19,11 @@ npm run dev
 
 `npm run setup` applies migrations and loads the demo. The app is at http://localhost:3000. Postgres is published on `127.0.0.1:5432` only.
 
-The app uses two database roles. `DATABASE_URL` is `bridgingeden_app`, which can insert ledger rows and cannot update, delete, or truncate them. `DIRECT_URL` is `bridgingeden_owner`, which Prisma Migrate uses. Neither role is a superuser. Docker's `POSTGRES_USER` is a bootstrap superuser used only to create the roles and the `btree_gist` extension. Do not put that user in `DATABASE_URL`.
+The app uses two database roles. `DATABASE_URL` is `bridgingeden_app`, the only login the running app is allowed to use. It can insert ledger rows. It cannot update or delete them, and it cannot truncate them. On `credit_batches` it can update only the status, serial, and approval or rejection columns. `DIRECT_URL` is `bridgingeden_owner`. Prisma Migrate uses it, and the test suite uses it to reset rows. The owner is not a runtime credential: it can disable triggers, including the truncate guards. Neither role is a superuser. After bootstrap the owner also has neither `CREATEDB` nor `CREATEROLE`. Docker's `POSTGRES_USER` is a bootstrap superuser used only to create the roles and the `btree_gist` extension. Do not put that user, or the owner, in `DATABASE_URL`.
 
-On a Postgres that was created before these roles existed, run `docker/bootstrap-roles.sql` as a superuser against `postgres`, `bridgingeden`, and `bridgingeden_test`, then migrate. A fresh `docker compose` volume runs the same setup from `docker/init.sql`.
+Set `BRIDGINGEDEN_OWNER_PASSWORD` and `BRIDGINGEDEN_APP_PASSWORD` before the first `docker compose up`. `docker/init.sh` reads them and refuses a password that equals the role name. On a Postgres that was created before these roles existed, run `docker/bootstrap-roles.sql` as a superuser with `-v owner_password=... -v app_password=...` against `postgres`, `bridgingeden`, and `bridgingeden_test`, then migrate. Do not put those passwords in the SQL file.
 
-The seed refuses to run when `NODE_ENV=production`. Demo passwords are refreshed only by that seed. The login page shows them only when Node is not in production.
+The seed runs only when `ALLOW_DEMO_SEED=1`, `NODE_ENV` is not `production`, and every user already in the database is one of the four demo accounts. `npm run setup` sets the flag for a local demo. The login page shows the demo passwords only when Node is not in production.
 
 | Script | What it does |
 | --- | --- |
@@ -35,9 +35,9 @@ The seed refuses to run when `NODE_ENV=production`. Demo passwords are refreshed
 
 ### Production environment
 
-`AUTH_SECRET` must be a unique value of at least 32 bytes. The placeholder in older examples is rejected, and an empty value is rejected. `AUTH_URL` must be the public origin (`https://…`). The process refuses to serve production traffic without both. `trustHost` stays on so Auth.js can run behind a host header, and it is safe only because `AUTH_URL` is pinned.
+`AUTH_SECRET` must be a unique value of at least 32 bytes. The placeholder in older examples is rejected, and an empty value is rejected. `AUTH_URL` must be an absolute `https` URL. `http` is rejected in production. The process refuses to serve production traffic without both. `trustHost` stays on so Auth.js can run behind a host header, and it is safe only because `AUTH_URL` is pinned.
 
-In production the server also checks that `DATABASE_URL` is not a superuser.
+In production the server also refuses to start when `DATABASE_URL` is a superuser, a member of `bridgingeden_owner`, or a role that owns the ledger tables. The running app therefore cannot be given `DIRECT_URL`.
 
 ### Demo accounts
 
@@ -55,7 +55,7 @@ The seed also creates two projects:
 - **Glenmalure Native Woodland** (GLEN), vintage 2024, 500 t issued. Aoife holds serials 26–120 (95 t) after retiring 1–25 for Northwind Office Ltd. A 2026 draft of 180 t, drafted by the first admin, is waiting for Ciara to approve.
 - **Beara Atlantic Oakwoods** (BEARA), vintage 2025, 320 t issued. Liam holds serials 1–40. The rest is in the Bridging Eden inventory.
 
-Open **Issuance** as Ciara to approve the draft. The drafter sees that another admin must approve it. Open **Portfolio** as Aoife to see the holding, the retirement, and the certificate. The certificate links to a public `/verify/[eventId]` page.
+Open **Issuance** as Ciara to approve the draft. The drafter sees that another admin must approve it. The database also rejects an approval where `approved_by_id` equals `drafted_by_id`. Open **Portfolio** as Aoife to see the holding, the retirement, and the certificate. The certificate links to a public `/verify/[token]` page. The token is 128 random bits, separate from the event id.
 
 Staff create further holder accounts from **Holdings**. There is no public registration. Creating an admin in the database is an owner-role operation; the runtime role cannot insert or change an admin.
 
@@ -110,10 +110,12 @@ The migration, not only the application, refuses bad rows:
 - **No spend of tonnes you do not hold.** Before a credit is inserted on an asset or sink account, a trigger sweeps existing debits and credits and requires every serial in the new range to have a count of at least 1. An advisory lock serialises concurrent credits on the same account, project, and vintage.
 - **No unbalanced event.** A deferred constraint checks that debit ranges and credit ranges are the same multiset, with no internal overlap.
 - **No empty event.** An event without postings cannot commit.
-- **No edits.** `UPDATE` and `DELETE` on events, postings, issued ranges, and the audit log raise an exception. `TRUNCATE` is revoked from the runtime role and a `BEFORE TRUNCATE` trigger rejects it for everyone, including the owner, until that trigger is disabled. The owner can disable triggers; the runtime role cannot. The owner is not a superuser, so it also cannot set `session_replication_role = replica`.
-- **Immutable account identity.** `accounts.kind` and `accounts.code` cannot be updated. The runtime role may update an account's name and a user's password hash, and nothing else on those rows. `users.role` cannot be changed by the runtime role, and only the owner role can insert an admin.
+- **No edits.** `UPDATE` and `DELETE` on events, postings, issued ranges, and the audit log raise an exception. `TRUNCATE` is revoked from the runtime role and a `BEFORE TRUNCATE` trigger rejects it for everyone, including the owner, until that trigger is disabled. The owner can disable triggers; the runtime role cannot. That is why the owner URL stays out of the running app. The owner is not a superuser, so it also cannot set `session_replication_role = replica`.
+- **Immutable account identity.** `accounts.kind` and `accounts.code` cannot be updated. The runtime role may update an account's name, a user's password hash, and that user's token version, and nothing else on those rows. `users.role` cannot be changed by the runtime role, and only the owner role can insert an admin.
+- **Issuance is a batch.** A deferred constraint rejects a contra credit, and rejects an `ISSUANCE` event, unless the event points at a batch whose status is `APPROVED` and whose quantity and serial range match the contra postings. A direct insert with no approved batch does not mint.
+- **Four eyes, in the database.** `credit_batches` has `CHECK (approved_by_id IS NULL OR approved_by_id <> drafted_by_id)`. A `BEFORE UPDATE` trigger freezes a batch that is no longer `DRAFT`, including for the table owner. The runtime role's `UPDATE` grant on that table is column-level: status, serial start, serial end, and the approval and rejection columns.
 
-Approval is the moment serials are chosen: the next number after the project's highest issued serial, under a per-project lock. The approver must be a different person from the drafter. The status update is conditional on the batch still being a draft, and reject takes the same per-project lock, so approve and reject cannot both commit. Drafting and rejecting a batch write an audit row and nothing in the ledger.
+Approval is the moment serials are chosen: the next number after the project's highest issued serial, under a per-project lock. The approver must be a different person from the drafter, in the service and in the check constraint. The status update is conditional on the batch still being a draft, and reject takes the same per-project lock, so approve and reject cannot both commit. Drafting and rejecting a batch write an audit row and nothing in the ledger.
 
 `reconcile()` checks the derived invariant: for each project, tonnes held plus tonnes retired plus tonnes cancelled equals tonnes issued, and no serial sits in two holdings. The admin overview shows that check.
 
@@ -125,7 +127,7 @@ Tests in `tests/ranges.test.ts` cover range splits and derived balances without 
 2. The admin drafts a batch: vintage year, quantity in tonnes, methodology.
 3. A different admin approves it. Both identities and timestamps are stored. The same person cannot approve their own draft.
 4. The admin transfers tonnes from inventory to a holder, by quantity or by an exact serial range.
-5. The holder retires tonnes they hold, naming a beneficiary and a reason, and downloads a PDF certificate. The certificate includes a QR code and a public verification URL. That page shows the project, vintage, serials, quantity, beneficiary, date, and status.
+5. The holder retires tonnes they hold, naming a beneficiary and a reason, and downloads a PDF certificate. The certificate includes a QR code and a public verification URL. The URL carries a 128-bit token, not the event id. That page shows the project, vintage, serials, quantity, beneficiary, date, and status, and it is rate limited.
 
 Cancellation is the staff path for tonnes that should leave circulation without a retirement certificate.
 
@@ -143,11 +145,13 @@ Serial ranges travel as metadata. Reconciliation is one way: compare chain movem
 
 ## Deploying
 
-The app is a standard Next.js deployment. On Vercel, set `DATABASE_URL` to the runtime role, `DIRECT_URL` to the migration role, `AUTH_SECRET` (at least 32 bytes, not a placeholder), and `AUTH_URL` to the public origin. Use a hosted Postgres that allows `btree_gist` (Neon, RDS, and current Supabase Postgres do). Create `bridgingeden_owner` and `bridgingeden_app` with passwords that are not the local defaults, grant them as `docker/bootstrap-roles.sql` does, and run `prisma migrate deploy` as `bridgingeden_owner`. Do not run the seed against production.
+The app is a standard Next.js deployment. The running app, including Vercel, gets `DATABASE_URL` for `bridgingeden_app` and nothing else for the database. Do not set `DIRECT_URL` there. Prisma Client queries do not need it. Migrations run from CI or a release job that has `DIRECT_URL` for `bridgingeden_owner` and runs `prisma migrate deploy`. The Next.js build does not migrate. Create both roles with `docker/bootstrap-roles.sql`, passing real passwords in `-v owner_password` and `-v app_password`. Use a hosted Postgres that allows `btree_gist` (Neon, RDS, and current Supabase Postgres do). Do not run the seed against production.
+
+Also set `AUTH_SECRET` (at least 32 bytes, not a placeholder) and `AUTH_URL` to the public `https` origin. Production startup rejects `http`. Sessions last eight hours and carry a token version. Changing a password increments that version, and the next request drops the old session. Failed logins use a per-account backoff rather than a hard lockout. A failed login for an unknown address writes at most one audit row per IP per window, storing a hash of the address after it has been cut to 254 characters, not the address itself. Expired throttle rows are removed by `npm run db:sweep`, including on a timer in the production server, not on each login.
 
 Supporting documents are stored in Postgres and limited to two files of 1.5 MB so a server action stays under the platform body limit of about 4.5 MB. Larger project files would need direct-to-storage uploads. That path is not in this version.
 
-Sessions last eight hours. Admin pages and actions load the user's role from the database on each request, so a demotion applies before the token expires. Failed logins are rate limited and written to the audit log.
+Admin pages and actions load the user's role and token version from the database on each request, so a demotion or a password change applies before the token expires. Script CSP uses a per-request nonce. Style attributes still need `'unsafe-inline'` because a nonce does not cover them.
 
 Auth.js in this version is `next-auth` 5 beta. That is a known dependency risk until a stable release is adopted.
 

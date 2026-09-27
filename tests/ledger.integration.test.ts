@@ -4,7 +4,7 @@ import { PDFDocument } from "pdf-lib";
 import { prisma } from "@/lib/db";
 import { buildRetirementCertificate } from "@/lib/certificate";
 import { listHoldings } from "@/lib/ledger/queries";
-import { loadRetirementVerification } from "@/lib/verify";
+import { loadRetirementByToken, loadRetirementVerification } from "@/lib/verify";
 import { ownerPrisma } from "./owner-db";
 import { resetTransactionalData } from "./reset-db";
 import {
@@ -403,7 +403,7 @@ describe("ledger database rules", () => {
       prisma.$transaction(async (tx) => {
         const event = await tx.ledgerEvent.create({
           data: {
-            type: "ISSUANCE",
+            type: "TRANSFER",
             projectId: project.id,
             vintageYear: 2024,
             actorId: adminId,
@@ -615,7 +615,9 @@ describe("ledger database rules", () => {
     expect(pdf).toBeTruthy();
     const document = await PDFDocument.load(pdf!);
     expect(document.getPageCount()).toBeGreaterThan(1);
-    const verified = await loadRetirementVerification(retired.eventId);
+    const stored = await prisma.ledgerEvent.findUniqueOrThrow({ where: { id: retired.eventId } });
+    expect(stored.verificationToken).toMatch(/^[a-f0-9]{32}$/);
+    const verified = await loadRetirementByToken(stored.verificationToken!);
     expect(verified).toMatchObject({
       status: "Retired",
       projectCode: "CERT",
@@ -624,6 +626,115 @@ describe("ledger database rules", () => {
       beneficiary: "Córas – Northwind",
     });
     expect(verified?.serials[0]).toContain("–");
-    expect(await loadRetirementVerification("not-a-retirement")).toBeNull();
+    expect(await loadRetirementByToken(retired.eventId)).toBeNull();
+    expect((await loadRetirementVerification(retired.eventId))?.verificationToken).toBe(stored.verificationToken);
+  });
+
+  it("rejects a contra issuance that is not tied to an approved batch", async () => {
+    const project = await makeProject("MINT");
+    const inventory = await prisma.account.findUniqueOrThrow({ where: { code: "INVENTORY" } });
+    const issuance = await prisma.account.findUniqueOrThrow({ where: { code: "ISSUANCE" } });
+    await expect(
+      prisma.$transaction(async (tx) => {
+        const event = await tx.ledgerEvent.create({
+          data: {
+            type: "ISSUANCE",
+            projectId: project.id,
+            vintageYear: 2024,
+            actorId: adminId,
+          },
+        });
+        await tx.ledgerPosting.create({
+          data: {
+            eventId: event.id,
+            accountId: inventory.id,
+            side: "DEBIT",
+            projectId: project.id,
+            vintageYear: 2024,
+            serialStart: 1,
+            serialEnd: 5,
+            quantity: 5,
+          },
+        });
+        await tx.ledgerPosting.create({
+          data: {
+            eventId: event.id,
+            accountId: issuance.id,
+            side: "CREDIT",
+            projectId: project.id,
+            vintageYear: 2024,
+            serialStart: 1,
+            serialEnd: 5,
+            quantity: 5,
+          },
+        });
+      }),
+    ).rejects.toThrow(/approved credit batch/);
+    expect(await prisma.issuedSerialRange.count()).toBe(0);
+  });
+
+  it("rejects self-approval and limits batch updates to approval columns", async () => {
+    const project = await makeProject("EYES");
+    const batch = await draftBatch({
+      projectId: project.id,
+      vintageYear: 2024,
+      quantity: 5,
+      methodology: "Native Woodland Establishment",
+      actorId: adminId,
+    });
+    await expect(
+      prisma.$executeRaw`
+        UPDATE credit_batches
+        SET status = 'APPROVED',
+            serial_start = 1,
+            serial_end = 5,
+            approved_by_id = ${adminId},
+            approved_at = NOW()
+        WHERE id = ${batch.id}
+      `,
+    ).rejects.toThrow(/credit_batches_four_eyes/);
+    await expect(
+      prisma.$executeRaw`UPDATE credit_batches SET quantity = 9 WHERE id = ${batch.id}`,
+    ).rejects.toThrow(/permission denied/);
+    const columns = await prisma.$queryRaw<{ attname: string }[]>`
+      SELECT a.attname
+      FROM pg_attribute a
+      JOIN pg_class c ON c.oid = a.attrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public'
+        AND c.relname = 'credit_batches'
+        AND a.attnum > 0
+        AND NOT a.attisdropped
+        AND has_column_privilege(current_user, a.attrelid, a.attname, 'UPDATE')
+      ORDER BY a.attname
+    `;
+    expect(columns.map((column) => column.attname)).toEqual([
+      "approved_at",
+      "approved_by_id",
+      "rejected_at",
+      "rejected_by_id",
+      "rejection_note",
+      "serial_end",
+      "serial_start",
+      "status",
+    ]);
+  });
+
+  it("freezes a batch once it leaves draft", async () => {
+    const project = await makeProject("FROZEN");
+    const batch = await draftBatch({
+      projectId: project.id,
+      vintageYear: 2024,
+      quantity: 3,
+      methodology: "Native Woodland Establishment",
+      actorId: adminId,
+    });
+    await approveBatch(batch.id, approverId);
+    await expect(
+      prisma.$executeRaw`UPDATE credit_batches SET rejection_note = 'later' WHERE id = ${batch.id}`,
+    ).rejects.toThrow(/frozen/);
+    await expect(
+      ownerPrisma.$executeRaw`UPDATE credit_batches SET rejection_note = 'later' WHERE id = ${batch.id}`,
+    ).rejects.toThrow(/frozen/);
   });
 });

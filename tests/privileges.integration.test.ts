@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { prisma } from "@/lib/db";
+import { runtimeRoleProblem } from "@/lib/db-role";
 import { ensureSystemAccounts } from "@/lib/ledger/service";
 import { ownerPrisma } from "./owner-db";
 
@@ -24,6 +25,13 @@ describe("runtime database role", () => {
     expect(app.rolsuper).toBe(false);
     expect(owner.current_user).toBe("bridgingeden_owner");
     expect(owner.rolsuper).toBe(false);
+    const [flags] = await ownerPrisma.$queryRaw<{ rolcreatedb: boolean; rolcreaterole: boolean }[]>`
+      SELECT rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname = current_user
+    `;
+    expect(flags.rolcreatedb).toBe(false);
+    expect(flags.rolcreaterole).toBe(false);
+    expect(await runtimeRoleProblem(prisma)).toBeNull();
+    expect(await runtimeRoleProblem(ownerPrisma)).toMatch(/bridgingeden_owner|ledger tables/);
   });
 
   it("cannot truncate, disable triggers, change account kind, or replicate as the app", async () => {

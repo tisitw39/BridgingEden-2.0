@@ -1,18 +1,26 @@
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 import { formatDate, formatTonnes } from "@/lib/format";
-import { loadRetirementVerification } from "@/lib/verify";
+import { clientIp } from "@/lib/authenticate";
+import { allowVerificationLookup, loadRetirementByToken } from "@/lib/verify";
 
 export const metadata: Metadata = { title: "Verify a retirement" };
 
-export default async function VerifyPage({ params }: { params: Promise<{ eventId: string }> }) {
-  const { eventId } = await params;
-  const record = await loadRetirementVerification(eventId);
+export default async function VerifyPage({ params }: { params: Promise<{ token: string }> }) {
+  const { token } = await params;
+  const headerList = await headers();
+  const allowed = await allowVerificationLookup(clientIp({ headers: headerList }));
+  const record = allowed ? await loadRetirementByToken(token) : null;
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-14 lg:px-8">
       <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted">Public record</p>
       <h1 className="mt-2 font-serif text-4xl text-ink sm:text-5xl">Verify a retirement</h1>
-      {record ? (
+      {!allowed ? (
+        <p className="mt-8 rounded-2xl border border-line bg-white px-6 py-8 text-sm text-muted">
+          Too many verification attempts from this network. Wait a few minutes and try the link again.
+        </p>
+      ) : record ? (
         <dl className="mt-8 divide-y divide-line rounded-2xl border border-line bg-white">
           <Row label="Status" value={record.status} />
           <Row label="Project" value={`${record.projectName} (${record.projectCode})`} />

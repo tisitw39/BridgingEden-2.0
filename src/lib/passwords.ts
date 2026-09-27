@@ -22,7 +22,10 @@ export async function changePassword(userId: string, currentPassword: string, ne
     throw new LedgerError("Choose a different password.", "INVALID");
   }
   const passwordHash = await hash(newPassword, BCRYPT_COST);
-  await prisma.user.update({ where: { id: userId }, data: { passwordHash } });
+  await prisma.user.update({
+    where: { id: userId },
+    data: { passwordHash, tokenVersion: { increment: 1 } },
+  });
   await prisma.auditLog.create({
     data: {
       actorId: userId,

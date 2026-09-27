@@ -9,10 +9,11 @@
     "postinstall": "prisma generate",
     "db:up": "docker compose up -d",
     "db:migrate": "prisma migrate deploy",
-    "db:seed": "prisma db seed",
-    "db:reset": "prisma migrate reset --force",
+    "db:seed": "ALLOW_DEMO_SEED=1 prisma db seed",
+    "db:reset": "ALLOW_DEMO_SEED=1 prisma migrate reset --force",
+    "db:sweep": "tsx scripts/sweep-attempts.ts",
     "test": "vitest run",
-    "setup": "prisma migrate deploy && prisma db seed"
+    "setup": "prisma migrate deploy && ALLOW_DEMO_SEED=1 prisma db seed"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

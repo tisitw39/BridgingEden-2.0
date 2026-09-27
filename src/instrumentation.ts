@@ -1,13 +1,23 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
-  const { assertProductionEnv } = await import("@/lib/env");
-  const { prisma } = await import("@/lib/db");
-  assertProductionEnv();
-  if (process.env.NODE_ENV !== "production") return;
-  const rows = await prisma.$queryRaw<{ rolsuper: boolean }[]>`
-    SELECT rolsuper FROM pg_roles WHERE rolname = current_user
-  `;
-  if (!rows[0] || rows[0].rolsuper) {
-    throw new Error("The application database role must not be a superuser.");
+  try {
+    const { assertProductionEnv } = await import("@/lib/env");
+    assertProductionEnv();
+    if (process.env.NODE_ENV !== "production") return;
+
+    const { prisma } = await import("@/lib/db");
+    const { runtimeRoleProblem } = await import("@/lib/db-role");
+    const problem = await runtimeRoleProblem(prisma);
+    if (problem) throw new Error(problem);
+
+    const { sweepExpiredAttempts } = await import("@/lib/retention");
+    const sweep = () => {
+      sweepExpiredAttempts().catch(() => undefined);
+    };
+    sweep();
+    setInterval(sweep, 60 * 60 * 1000).unref();
+  } catch (error) {
+    console.error(error);
+    process.exit(1);
   }
 }

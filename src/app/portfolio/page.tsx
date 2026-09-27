@@ -272,9 +272,11 @@ export default async function PortfolioPage({
                             <a className="text-forest underline" href={`/api/certificates/${event.id}`}>
                               Download certificate
                             </a>
-                            <a className="text-forest underline" href={`/verify/${event.id}`}>
-                              Verification page
-                            </a>
+                            {event.verificationToken ? (
+                              <a className="text-forest underline" href={`/verify/${event.verificationToken}`}>
+                                Verification page
+                              </a>
+                            ) : null}
                           </span>
                         ) : null}
                       </td>

@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { Prisma, type LedgerEventType, type PostingSide } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { LedgerError } from "@/lib/ledger/errors";
@@ -61,7 +62,14 @@ function rethrow(error: unknown): never {
   ) {
     throw new LedgerError("Those serial numbers overlap an existing issuance.", "OVERLAP");
   }
-  if (message.includes("append-only") || message.includes("unbalanced ledger event")) {
+  if (
+    message.includes("append-only") ||
+    message.includes("unbalanced ledger event") ||
+    message.includes("approved credit batch") ||
+    message.includes("do not match the approved batch") ||
+    message.includes("is frozen") ||
+    message.includes("credit_batches_four_eyes")
+  ) {
     throw new LedgerError("The ledger rejected this entry.", "INVARIANT");
   }
   throw error;
@@ -182,6 +190,7 @@ async function postMove(
       beneficiary: input.beneficiary,
       reason: input.reason,
       batchId: input.batchId,
+      verificationToken: input.type === "RETIREMENT" ? randomBytes(16).toString("hex") : null,
     },
   });
   for (const range of input.ranges) {

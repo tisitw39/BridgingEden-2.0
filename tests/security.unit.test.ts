@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { SESSION_MAX_AGE_SECONDS, sessionClaims } from "@/auth.config";
+import { clientIp } from "@/lib/authenticate";
 import { documentDownloadHeaders } from "@/lib/documents";
 import { productionEnvError } from "@/lib/env";
 import { errorText, noticeText } from "@/lib/flash";
 import { pdfText } from "@/lib/pdf-text";
-import { securityHeaders } from "@/lib/security-headers";
+import { contentSecurityPolicy, securityHeaders } from "@/lib/security-headers";
 
 describe("session claims", () => {
   it("keeps an explicit admin or holder and rejects anything else", () => {
@@ -31,6 +32,13 @@ describe("production environment", () => {
     expect(productionEnvError({ NODE_ENV: "production", AUTH_SECRET: "x".repeat(32), AUTH_URL: "" })).toMatch(
       /AUTH_URL/,
     );
+    expect(
+      productionEnvError({
+        NODE_ENV: "production",
+        AUTH_SECRET: "x".repeat(32),
+        AUTH_URL: "http://registry.example",
+      }),
+    ).toMatch(/https/);
     expect(
       productionEnvError({
         NODE_ENV: "production",
@@ -62,16 +70,42 @@ describe("pdf text", () => {
 });
 
 describe("security headers", () => {
-  it("sets CSP, nosniff, frame denial and referrer policy, and HSTS in production", () => {
+  it("sets nosniff, frame denial, referrer policy, permissions policy, and HSTS in production", () => {
     const dev = securityHeaders("development");
     const prod = securityHeaders("production");
-    const csp = dev.find((header) => header.key === "Content-Security-Policy")?.value ?? "";
-    expect(csp).toContain("frame-ancestors 'none'");
     expect(dev).toContainEqual({ key: "X-Content-Type-Options", value: "nosniff" });
     expect(dev).toContainEqual({ key: "X-Frame-Options", value: "DENY" });
     expect(dev).toContainEqual({ key: "Referrer-Policy", value: "strict-origin-when-cross-origin" });
+    expect(dev.find((header) => header.key === "Permissions-Policy")?.value).toContain("camera=()");
     expect(dev.some((header) => header.key === "Strict-Transport-Security")).toBe(false);
     expect(prod.some((header) => header.key === "Strict-Transport-Security")).toBe(true);
+  });
+
+  it("uses a script nonce and does not allow unsafe-inline scripts", () => {
+    const csp = contentSecurityPolicy("abc+123=", "production");
+    const script = csp.split(";").map((part) => part.trim()).find((part) => part.startsWith("script-src")) ?? "";
+    expect(script).toContain("'nonce-abc+123='");
+    expect(script).not.toContain("unsafe-inline");
+    expect(script).not.toContain("unsafe-eval");
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(contentSecurityPolicy("abc", "development")).toContain("unsafe-eval");
+  });
+});
+
+describe("client ip", () => {
+  it("uses the Vercel platform header, otherwise the rightmost forwarded hop", () => {
+    const spoofed = new Request("http://localhost/login", {
+      headers: { "x-forwarded-for": "1.1.1.1, 2.2.2.2" },
+    });
+    expect(clientIp(spoofed, {})).toBe("2.2.2.2");
+    const vercel = new Request("http://localhost/login", {
+      headers: {
+        "x-forwarded-for": "1.1.1.1",
+        "x-vercel-forwarded-for": "9.9.9.9, 8.8.8.8",
+      },
+    });
+    expect(clientIp(vercel, { VERCEL: "1" })).toBe("8.8.8.8");
+    expect(clientIp(vercel, {})).toBe("1.1.1.1");
   });
 });
 

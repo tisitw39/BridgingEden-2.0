@@ -18,6 +18,7 @@ export async function resetTransactionalData() {
       ledger_postings,
       ledger_events,
       login_attempts,
+      verify_lookups,
       credit_batches,
       project_documents,
       projects

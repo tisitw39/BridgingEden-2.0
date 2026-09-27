@@ -189,7 +189,7 @@ export async function buildRetirementCertificate(eventId: string): Promise<Uint8
     drawLines(sheet, wrap(serial, (line) => serifBold.widthOfTextAtSize(line, 12), sheet.width - 96), 48, 12, serifBold, forest, 18);
   }
 
-  const url = verificationUrl(record.eventId);
+  const url = verificationUrl(record.verificationToken);
   const qr = await QRCode.toBuffer(url, {
     type: "png",
     width: 180,

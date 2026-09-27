@@ -23,8 +23,8 @@ export function productionEnvError(env: ProductionEnv = process.env): string | n
   const url = env.AUTH_URL ?? "";
   try {
     const parsed = new URL(url);
-    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-      return "AUTH_URL must be an absolute http(s) URL in production.";
+    if (parsed.protocol !== "https:") {
+      return "AUTH_URL must be an absolute https URL in production.";
     }
   } catch {
     return "AUTH_URL must be set to the public origin in production.";

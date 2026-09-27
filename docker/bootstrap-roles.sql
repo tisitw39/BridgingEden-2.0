@@ -1,25 +1,63 @@
 -- For an existing Postgres where the Docker init script did not run.
--- Connect as a superuser, then run this file twice: once against `postgres`
--- is enough for the roles, and once against each application database for ownership.
--- Example:
---   psql "postgresql://SUPERUSER@127.0.0.1:5432/postgres" -f docker/bootstrap-roles.sql
---   psql "postgresql://SUPERUSER@127.0.0.1:5432/bridgingeden" -f docker/bootstrap-roles.sql
---   psql "postgresql://SUPERUSER@127.0.0.1:5432/bridgingeden_test" -f docker/bootstrap-roles.sql
+-- Connect as a superuser. Passwords come from psql variables, not from this file.
+--
+--   psql "postgresql://SUPERUSER@127.0.0.1:5432/postgres" \
+--     -v owner_password="$BRIDGINGEDEN_OWNER_PASSWORD" \
+--     -v app_password="$BRIDGINGEDEN_APP_PASSWORD" \
+--     -f docker/bootstrap-roles.sql
+--   psql "postgresql://SUPERUSER@127.0.0.1:5432/bridgingeden" \
+--     -v owner_password="$BRIDGINGEDEN_OWNER_PASSWORD" \
+--     -v app_password="$BRIDGINGEDEN_APP_PASSWORD" \
+--     -f docker/bootstrap-roles.sql
+--   psql "postgresql://SUPERUSER@127.0.0.1:5432/bridgingeden_test" \
+--     -v owner_password="$BRIDGINGEDEN_OWNER_PASSWORD" \
+--     -v app_password="$BRIDGINGEDEN_APP_PASSWORD" \
+--     -f docker/bootstrap-roles.sql
+--
+-- Use long random passwords. Values equal to the role names are refused.
+-- After this script, bridgingeden_owner has neither CREATEDB nor CREATEROLE.
+
+\if :{?owner_password}
+\else
+  \warn owner_password is required. Pass -v owner_password=... -v app_password=...
+  \quit 1
+\endif
+\if :{?app_password}
+\else
+  \warn app_password is required. Pass -v owner_password=... -v app_password=...
+  \quit 1
+\endif
+
+SELECT set_config('bridgingeden.owner_password', :'owner_password', false);
+SELECT set_config('bridgingeden.app_password', :'app_password', false);
 
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'bridgingeden_owner') THEN
-    CREATE ROLE bridgingeden_owner LOGIN PASSWORD 'bridgingeden_owner'
-      NOSUPERUSER CREATEDB CREATEROLE NOREPLICATION;
+  IF current_setting('bridgingeden.owner_password') = ''
+     OR current_setting('bridgingeden.app_password') = ''
+     OR current_setting('bridgingeden.owner_password') = 'bridgingeden_owner'
+     OR current_setting('bridgingeden.app_password') = 'bridgingeden_app' THEN
+    RAISE EXCEPTION 'owner_password and app_password must be set and must not equal the role names';
   END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'bridgingeden_owner') THEN
+    EXECUTE format(
+      'CREATE ROLE bridgingeden_owner LOGIN PASSWORD %L NOSUPERUSER CREATEDB CREATEROLE NOREPLICATION',
+      current_setting('bridgingeden.owner_password')
+    );
+  ELSE
+    EXECUTE format('ALTER ROLE bridgingeden_owner PASSWORD %L', current_setting('bridgingeden.owner_password'));
+  END IF;
+
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'bridgingeden_app') THEN
-    CREATE ROLE bridgingeden_app LOGIN PASSWORD 'bridgingeden_app'
-      NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+    EXECUTE format(
+      'CREATE ROLE bridgingeden_app LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION',
+      current_setting('bridgingeden.app_password')
+    );
+  ELSE
+    EXECUTE format('ALTER ROLE bridgingeden_app PASSWORD %L', current_setting('bridgingeden.app_password'));
   END IF;
 END $$;
-
-ALTER ROLE bridgingeden_owner NOSUPERUSER CREATEDB CREATEROLE NOREPLICATION;
-ALTER ROLE bridgingeden_app NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 
 DO $$
 BEGIN
@@ -64,3 +102,6 @@ BEGIN
     EXECUTE format('ALTER FUNCTION public.%I(%s) OWNER TO bridgingeden_owner', r.proname, r.args);
   END LOOP;
 END $$;
+
+ALTER ROLE bridgingeden_owner NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+ALTER ROLE bridgingeden_app NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;

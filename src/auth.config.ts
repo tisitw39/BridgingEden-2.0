@@ -29,10 +29,13 @@ export const authConfig = {
         const claims = sessionClaims((user as { role?: unknown }).role, (user as { id?: unknown }).id);
         token.id = claims.id;
         token.role = claims.role;
+        const version = (user as { tokenVersion?: unknown }).tokenVersion;
+        token.tokenVersion = typeof version === "number" ? version : 0;
       } else {
         const claims = sessionClaims(token.role, token.id);
         token.id = claims.id;
         token.role = claims.role;
+        if (typeof token.tokenVersion !== "number") token.tokenVersion = -1;
       }
       return token;
     },
@@ -40,6 +43,7 @@ export const authConfig = {
       const claims = sessionClaims(token.role, token.id);
       session.user.id = claims.id;
       session.user.role = claims.role;
+      session.user.tokenVersion = typeof token.tokenVersion === "number" ? token.tokenVersion : -1;
       return session;
     },
   },

@@ -19,6 +19,8 @@ import { prisma } from "@/lib/db";
 import { transferAction } from "@/lib/actions/holdings";
 import { retireAction } from "@/lib/actions/retire";
 import { authenticate } from "@/lib/authenticate";
+import { allowVerificationLookup } from "@/lib/verify";
+import { currentUser } from "@/lib/session";
 import {
   approveBatch,
   draftBatch,
@@ -41,7 +43,10 @@ let holderAccountId = "";
 let otherAccountId = "";
 
 async function signInAs(id: string, role: "ADMIN" | "HOLDER") {
-  authMock.mockResolvedValue({ user: { id, role, email: `${id}@test.local` } } as never);
+  const user = await prisma.user.findUniqueOrThrow({ where: { id }, select: { tokenVersion: true } });
+  authMock.mockResolvedValue({
+    user: { id, role, email: `${id}@test.local`, tokenVersion: user.tokenVersion },
+  } as never);
 }
 
 describe("authentication and authorisation", () => {
@@ -180,12 +185,18 @@ describe("authentication and authorisation", () => {
   });
 
   it("audits failed logins on the shared authenticate path and rate limits them", async () => {
-    const missing = await authenticate("nobody@test.local", "wrong-password", "203.0.113.5");
+    const marker = "not-a-real-mailbox";
+    const oversized = `${marker}${"x".repeat(300)}@example.com`;
+    const missing = await authenticate(oversized, "wrong-password", "203.0.113.5");
     expect(missing).toBeNull();
-    const missingAudit = await prisma.auditLog.findFirst({
-      where: { action: "auth.login_failed", entityId: "unknown" },
+    await authenticate("other-unknown@example.com", "wrong-password", "203.0.113.5");
+    const missingAudits = await prisma.auditLog.findMany({
+      where: { action: "auth.login_failed_unknown", entityId: "203.0.113.5" },
     });
-    expect(missingAudit).toBeTruthy();
+    expect(missingAudits).toHaveLength(1);
+    expect(JSON.stringify(missingAudits)).not.toContain(marker);
+    const storedEmails = await prisma.loginAttempt.findMany({ where: { ip: "203.0.113.5" } });
+    expect(storedEmails.every((row) => row.email === "unknown")).toBe(true);
 
     const wrong = await authenticate("auth-holder@test.local", "not-the-password", "203.0.113.5");
     expect(wrong).toBeNull();
@@ -194,6 +205,7 @@ describe("authentication and authorisation", () => {
     });
     expect(wrongAudit).toBeTruthy();
 
+    await prisma.loginAttempt.deleteMany({ where: { email: "auth-holder@test.local" } });
     const ok = await authenticate("auth-holder@test.local", "HolderDemo!2026", "203.0.113.5");
     expect(ok?.id).toBe(holderId);
     expect(await prisma.auditLog.count({ where: { action: "auth.login", actorId: holderId } })).toBe(1);
@@ -207,10 +219,51 @@ describe("authentication and authorisation", () => {
     expect(await prisma.loginAttempt.count({ where: { email: "auth-holder@test.local" } })).toBe(8);
   });
 
+  it("does not let a concurrent login burst exceed one guess in the backoff window", async () => {
+    const results = await Promise.all(
+      Array.from({ length: 12 }, () =>
+        authenticate("auth-holder@test.local", "not-the-password", "198.51.100.24"),
+      ),
+    );
+    expect(results.every((result) => result === null)).toBe(true);
+    expect(await prisma.loginAttempt.count({ where: { email: "auth-holder@test.local" } })).toBe(1);
+  });
+
   it("changes a password with one hash and then accepts only the new one", async () => {
     await changePassword(holderId, "HolderDemo!2026", "Replacement!2026");
+    await prisma.loginAttempt.deleteMany({ where: { email: "auth-holder@test.local" } });
     expect(await authenticate("auth-holder@test.local", "HolderDemo!2026", "203.0.113.5")).toBeNull();
+    await prisma.loginAttempt.deleteMany({ where: { email: "auth-holder@test.local" } });
     expect((await authenticate("auth-holder@test.local", "Replacement!2026", "203.0.113.5"))?.id).toBe(holderId);
     await changePassword(holderId, "Replacement!2026", "HolderDemo!2026");
+  });
+
+  it("invalidates sessions issued before a password change", async () => {
+    const before = await prisma.user.findUniqueOrThrow({
+      where: { id: holderId },
+      select: { tokenVersion: true },
+    });
+    await signInAs(holderId, "HOLDER");
+    expect((await currentUser())?.id).toBe(holderId);
+    await changePassword(holderId, "HolderDemo!2026", "Replacement!2026");
+    authMock.mockResolvedValue({
+      user: { id: holderId, role: "HOLDER", email: "auth-holder@test.local", tokenVersion: before.tokenVersion },
+    } as never);
+    expect(await currentUser()).toBeNull();
+    const after = await prisma.user.findUniqueOrThrow({
+      where: { id: holderId },
+      select: { tokenVersion: true },
+    });
+    expect(after.tokenVersion).toBe(before.tokenVersion + 1);
+    await signInAs(holderId, "HOLDER");
+    expect((await currentUser())?.id).toBe(holderId);
+    await changePassword(holderId, "Replacement!2026", "HolderDemo!2026");
+  });
+
+  it("caps concurrent verification lookups at the limit", async () => {
+    const ip = "198.51.100.40";
+    const results = await Promise.all(Array.from({ length: 40 }, () => allowVerificationLookup(ip)));
+    expect(results.filter(Boolean)).toHaveLength(30);
+    expect(await prisma.verifyLookup.count({ where: { ip } })).toBe(30);
   });
 });

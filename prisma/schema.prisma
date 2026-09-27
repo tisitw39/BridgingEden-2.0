@@ -43,6 +43,7 @@ model User {
   name            String
   passwordHash    String        @map("password_hash")
   role            Role
+  tokenVersion    Int           @default(0) @map("token_version")
   createdAt       DateTime      @default(now()) @map("created_at")
   account         Account?
   draftedBatches  CreditBatch[] @relation("DraftedBatches")
@@ -141,9 +142,10 @@ model LedgerEvent {
   memo        String?
   beneficiary String?
   reason      String?
-  batchId     String?         @unique @map("batch_id")
-  batch       CreditBatch?    @relation(fields: [batchId], references: [id])
-  recordedAt  DateTime        @default(now()) @map("recorded_at")
+  batchId             String?         @unique @map("batch_id")
+  batch               CreditBatch?    @relation(fields: [batchId], references: [id])
+  verificationToken   String?         @unique @map("verification_token")
+  recordedAt          DateTime        @default(now()) @map("recorded_at")
   postings    LedgerPosting[]
 
   @@index([type, recordedAt])
@@ -195,6 +197,15 @@ model LoginAttempt {
   @@index([email, createdAt])
   @@index([ip, createdAt])
   @@map("login_attempts")
+}
+
+model VerifyLookup {
+  id        String   @id @default(cuid())
+  ip        String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([ip, createdAt])
+  @@map("verify_lookups")
 }
 
 model AuditLog {

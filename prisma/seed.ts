@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { hash } from "bcryptjs";
 import { PrismaClient, type Role } from "@prisma/client";
+import { DEMO_USER_EMAILS, demoSeedEnvError, nonDemoUserError } from "../src/lib/demo-seed";
 import { BCRYPT_COST } from "../src/lib/passwords";
 import { prisma } from "../src/lib/db";
 import {
@@ -35,12 +36,16 @@ async function upsertUser(input: { email: string; name: string; password: string
 }
 
 async function main() {
-  if (process.env.NODE_ENV === "production") {
-    throw new Error("Refusing to seed while NODE_ENV=production.");
-  }
+  const envError = demoSeedEnvError(process.env);
+  if (envError) throw new Error(envError);
   if (!process.env.DIRECT_URL) {
     throw new Error("DIRECT_URL is required so the seed can create admin users as the owner role.");
   }
+  const strangers = await owner.user.count({
+    where: { email: { notIn: [...DEMO_USER_EMAILS] } },
+  });
+  const strangerError = nonDemoUserError(strangers);
+  if (strangerError) throw new Error(strangerError);
   await ensureSystemAccounts();
   const admin = await upsertUser({
     email: "admin@bridgingeden.ie",

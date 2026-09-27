@@ -2,13 +2,19 @@ import { redirect } from "next/navigation";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/db";
 
+export function sessionIsCurrent(claimed: unknown, actual: number): boolean {
+  return typeof claimed === "number" && Number.isInteger(claimed) && claimed >= 0 && claimed === actual;
+}
+
 async function actorFromSession() {
   const session = await auth();
   if (!session?.user?.id) return null;
-  return prisma.user.findUnique({
+  const user = await prisma.user.findUnique({
     where: { id: session.user.id },
-    select: { id: true, email: true, name: true, role: true },
+    select: { id: true, email: true, name: true, role: true, tokenVersion: true },
   });
+  if (!user || !sessionIsCurrent(session.user.tokenVersion, user.tokenVersion)) return null;
+  return user;
 }
 
 export async function requireUser() {

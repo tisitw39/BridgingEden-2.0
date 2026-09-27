@@ -1,15 +1,10 @@
 import { NextResponse } from "next/server";
-import { auth } from "@/auth";
 import { buildRetirementCertificate } from "@/lib/certificate";
 import { prisma } from "@/lib/db";
+import { currentUser } from "@/lib/session";
 
 export async function GET(_request: Request, context: { params: Promise<{ eventId: string }> }) {
-  const session = await auth();
-  if (!session?.user?.id) return new NextResponse("Sign in required", { status: 401 });
-  const actor = await prisma.user.findUnique({
-    where: { id: session.user.id },
-    select: { id: true, role: true },
-  });
+  const actor = await currentUser();
   if (!actor) return new NextResponse("Sign in required", { status: 401 });
   const { eventId } = await context.params;
   const event = await prisma.ledgerEvent.findUnique({

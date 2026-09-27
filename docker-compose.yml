@@ -5,11 +5,13 @@ services:
       POSTGRES_USER: bridgingeden
       POSTGRES_PASSWORD: bridgingeden
       POSTGRES_DB: bridgingeden
+      BRIDGINGEDEN_OWNER_PASSWORD: ${BRIDGINGEDEN_OWNER_PASSWORD:-}
+      BRIDGINGEDEN_APP_PASSWORD: ${BRIDGINGEDEN_APP_PASSWORD:-}
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
       - bridgingeden-pg:/var/lib/postgresql/data
-      - ./docker/init.sql:/docker-entrypoint-initdb.d/001-init.sql
+      - ./docker/init.sh:/docker-entrypoint-initdb.d/001-init.sh
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U bridgingeden -d bridgingeden"]
       interval: 5s
