@@ -2,7 +2,9 @@ import path from "node:path";
 import { defineConfig } from "vitest/config";
 
 const testDatabaseUrl =
-  "postgresql://bridgingeden:bridgingeden@127.0.0.1:5432/bridgingeden_test?schema=public";
+  "postgresql://bridgingeden_app:bridgingeden_app@127.0.0.1:5432/bridgingeden_test?schema=public";
+const testOwnerUrl =
+  "postgresql://bridgingeden_owner:bridgingeden_owner@127.0.0.1:5432/bridgingeden_test?schema=public";
 
 export default defineConfig({
   test: {
@@ -14,6 +16,7 @@ export default defineConfig({
     globalSetup: ["./tests/global-setup.ts"],
     env: {
       DATABASE_URL: testDatabaseUrl,
+      DIRECT_URL: testOwnerUrl,
     },
   },
   resolve: {
