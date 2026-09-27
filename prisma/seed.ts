@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { hash } from "bcryptjs";
-import type { Role } from "@prisma/client";
+import { PrismaClient, type Role } from "@prisma/client";
+import { BCRYPT_COST } from "../src/lib/passwords";
 import { prisma } from "../src/lib/db";
 import {
   approveBatch,
@@ -11,9 +12,13 @@ import {
   transferCredits,
 } from "../src/lib/ledger/service";
 
+const owner = new PrismaClient({
+  datasources: { db: { url: process.env.DIRECT_URL } },
+});
+
 async function upsertUser(input: { email: string; name: string; password: string; role: Role }) {
-  const passwordHash = await hash(input.password, 10);
-  const user = await prisma.user.upsert({
+  const passwordHash = await hash(input.password, BCRYPT_COST);
+  const user = await owner.user.upsert({
     where: { email: input.email },
     update: { name: input.name, role: input.role, passwordHash },
     create: {
@@ -30,10 +35,22 @@ async function upsertUser(input: { email: string; name: string; password: string
 }
 
 async function main() {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("Refusing to seed while NODE_ENV=production.");
+  }
+  if (!process.env.DIRECT_URL) {
+    throw new Error("DIRECT_URL is required so the seed can create admin users as the owner role.");
+  }
   await ensureSystemAccounts();
   const admin = await upsertUser({
     email: "admin@bridgingeden.ie",
     name: "Bridging Eden Registry",
+    password: "EdenAdmin!2026",
+    role: "ADMIN",
+  });
+  const approver = await upsertUser({
+    email: "ciara.nolan@bridgingeden.ie",
+    name: "Ciara Nolan",
     password: "EdenAdmin!2026",
     role: "ADMIN",
   });
@@ -70,27 +87,12 @@ async function main() {
         create: {
           fileName: "glenmalure-project-note.txt",
           mimeType: "text/plain",
-          sizeBytes: 0,
-          content: Buffer.from(""),
+          sizeBytes: Buffer.byteLength(glenNote()),
+          content: Buffer.from(glenNote()),
           uploadedById: admin.id,
         },
       },
     },
-    include: { documents: true },
-  });
-
-  const glenNote = [
-    "Glenmalure Native Woodland",
-    "Location: Glenmalure, Co. Wicklow, Ireland",
-    "Methodology: Native Woodland Establishment (BE-NW-1)",
-    "Registry reference: BE-REG-GLEN-001",
-    "",
-    "Species mix: sessile oak, birch, hazel, holly, rowan.",
-    "This note is a supporting document stored with the project. It is not a registry API record.",
-  ].join("\n");
-  await prisma.projectDocument.update({
-    where: { id: glen.documents[0].id },
-    data: { content: Buffer.from(glenNote), sizeBytes: Buffer.byteLength(glenNote) },
   });
 
   const beara = await prisma.project.create({
@@ -113,7 +115,7 @@ async function main() {
     methodology: glen.methodology,
     actorId: admin.id,
   });
-  await approveBatch(glenBatch.id, admin.id);
+  await approveBatch(glenBatch.id, approver.id);
 
   const bearaBatch = await draftBatch({
     projectId: beara.id,
@@ -122,7 +124,7 @@ async function main() {
     methodology: beara.methodology,
     actorId: admin.id,
   });
-  await approveBatch(bearaBatch.id, admin.id);
+  await approveBatch(bearaBatch.id, approver.id);
 
   await draftBatch({
     projectId: glen.id,
@@ -165,9 +167,22 @@ async function main() {
   });
 
   console.log("Seeded Bridging Eden demo data.");
-  console.log("Admin  admin@bridgingeden.ie / EdenAdmin!2026");
-  console.log("Holder aoife.brennan@example.com / HolderDemo!2026");
-  console.log("Holder liam.oconnell@example.com / HolderDemo!2026");
+  console.log("Admin    admin@bridgingeden.ie / EdenAdmin!2026");
+  console.log("Approver ciara.nolan@bridgingeden.ie / EdenAdmin!2026");
+  console.log("Holder   aoife.brennan@example.com / HolderDemo!2026");
+  console.log("Holder   liam.oconnell@example.com / HolderDemo!2026");
+}
+
+function glenNote() {
+  return [
+    "Glenmalure Native Woodland",
+    "Location: Glenmalure, Co. Wicklow, Ireland",
+    "Methodology: Native Woodland Establishment (BE-NW-1)",
+    "Registry reference: BE-REG-GLEN-001",
+    "",
+    "Species mix: sessile oak, birch, hazel, holly, rowan.",
+    "This note is a supporting document stored with the project. It is not a registry API record.",
+  ].join("\n");
 }
 
 main()
@@ -177,4 +192,5 @@ main()
   })
   .finally(async () => {
     await prisma.$disconnect();
+    await owner.$disconnect();
   });

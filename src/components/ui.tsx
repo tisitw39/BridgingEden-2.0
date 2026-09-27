@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { errorText, noticeText } from "@/lib/flash";
 
 export const inputClass =
   "w-full rounded-xl border border-line bg-cream px-3 py-2.5 text-sm text-ink outline-none ring-forest/30 placeholder:text-muted/70 focus:ring-2";
@@ -34,19 +35,18 @@ export function Panel({ children, className = "" }: { children: ReactNode; class
 }
 
 export function Flash({ error, notice }: { error?: string; notice?: string }) {
-  if (error) {
+  const message = errorText(error) ?? noticeText(notice);
+  if (!message) return null;
+  if (errorText(error)) {
     return (
       <p className="mb-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-[#8d1c1c]">
-        {error}
+        {message}
       </p>
     );
   }
-  if (notice) {
-    return (
-      <p className="mb-6 rounded-xl border border-line bg-pale px-4 py-3 text-sm text-forest">{notice}</p>
-    );
-  }
-  return null;
+  return (
+    <p className="mb-6 rounded-xl border border-line bg-pale px-4 py-3 text-sm text-forest">{message}</p>
+  );
 }
 
 export function PageTitle({

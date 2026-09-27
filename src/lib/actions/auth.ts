@@ -1,12 +1,21 @@
 "use server";
 
-import { compare } from "bcryptjs";
 import { AuthError } from "next-auth";
+import { z } from "zod";
 import { signIn, signOut } from "@/auth";
+import { errorCode, flashRedirect, isRedirectError } from "@/lib/http";
+import { LIMITS } from "@/lib/limits";
+import { changePassword } from "@/lib/passwords";
+import { LedgerError } from "@/lib/ledger/errors";
 import { prisma } from "@/lib/db";
-import { isRedirectError } from "@/lib/http";
+import { requireUser } from "@/lib/session";
 
 export type LoginState = { error?: string } | null;
+
+const passwordSchema = z
+  .string()
+  .min(8, "Use a password of at least 8 characters.")
+  .max(LIMITS.password, "That password is too long.");
 
 function safeCallback(callbackUrl: string, fallback: string) {
   if (callbackUrl.startsWith("/") && !callbackUrl.startsWith("//")) return callbackUrl;
@@ -25,23 +34,8 @@ export async function loginAction(_prev: LoginState, formData: FormData): Promis
     .trim();
   const password = String(formData.get("password") ?? "");
   const callbackUrl = String(formData.get("callbackUrl") ?? "");
-  const user = email ? await prisma.user.findUnique({ where: { email } }) : null;
-  const valid = user ? await compare(password, user.passwordHash) : false;
-  if (!user || !valid) {
-    return { error: "The email or password is incorrect." };
-  }
-
-  await prisma.auditLog.create({
-    data: {
-      actorId: user.id,
-      action: "auth.login",
-      entityType: "User",
-      entityId: user.id,
-      detail: { email: user.email },
-    },
-  });
-
-  const fallback = user.role === "ADMIN" ? "/admin" : "/portfolio";
+  const known = email ? await prisma.user.findUnique({ where: { email }, select: { role: true } }) : null;
+  const fallback = known?.role === "ADMIN" ? "/admin" : "/portfolio";
   const redirectTo = safeCallback(callbackUrl, fallback);
 
   try {
@@ -58,4 +52,38 @@ export async function loginAction(_prev: LoginState, formData: FormData): Promis
 
 export async function signOutAction() {
   await signOut({ redirectTo: "/" });
+}
+
+export async function changePasswordAction(formData: FormData) {
+  const user = await requireUser();
+  const parsed = z
+    .object({
+      currentPassword: z.string().min(1).max(LIMITS.password),
+      newPassword: passwordSchema,
+      confirmPassword: z.string().min(1).max(LIMITS.password),
+    })
+    .safeParse({
+      currentPassword: formData.get("currentPassword"),
+      newPassword: formData.get("newPassword"),
+      confirmPassword: formData.get("confirmPassword"),
+    });
+  if (!parsed.success) {
+    flashRedirect("/account", "error", errorCode(parsed.error, "form_invalid"));
+  }
+  if (parsed.data.newPassword !== parsed.data.confirmPassword) {
+    flashRedirect("/account", "error", "password_mismatch");
+  }
+  try {
+    await changePassword(user.id, parsed.data.currentPassword, parsed.data.newPassword);
+    flashRedirect("/account", "notice", "password_changed");
+  } catch (error) {
+    if (isRedirectError(error)) throw error;
+    if (error instanceof LedgerError && error.message.includes("current password")) {
+      flashRedirect("/account", "error", "password_wrong");
+    }
+    if (error instanceof LedgerError && error.message.includes("different password")) {
+      flashRedirect("/account", "error", "password_same");
+    }
+    flashRedirect("/account", "error", errorCode(error, "password_failed"));
+  }
 }

@@ -1,6 +1,7 @@
 import { Prisma, type LedgerEventType, type PostingSide } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { LedgerError } from "@/lib/ledger/errors";
+import { LIMITS } from "@/lib/limits";
 import {
   allocateQuantity,
   deriveHoldings,
@@ -26,7 +27,7 @@ export async function ensureSystemAccounts(client: Tx | Prisma.TransactionClient
   for (const account of SYSTEM_ACCOUNTS) {
     await client.account.upsert({
       where: { code: account.code },
-      update: { name: account.name, kind: account.kind },
+      update: { name: account.name },
       create: account,
     });
   }
@@ -162,6 +163,15 @@ async function postMove(
   if (input.ranges.length === 0) {
     throw new LedgerError("Nothing to post.", "INVALID");
   }
+  if (input.memo && input.memo.length > LIMITS.memo) {
+    throw new LedgerError(`A memo must be ${LIMITS.memo} characters or fewer.`, "INVALID");
+  }
+  if (input.beneficiary && input.beneficiary.length > LIMITS.beneficiary) {
+    throw new LedgerError(`A beneficiary must be ${LIMITS.beneficiary} characters or fewer.`, "INVALID");
+  }
+  if (input.reason && input.reason.length > LIMITS.reason) {
+    throw new LedgerError(`A reason must be ${LIMITS.reason} characters or fewer.`, "INVALID");
+  }
   const event = await tx.ledgerEvent.create({
     data: {
       type: input.type,
@@ -228,6 +238,15 @@ function assertQuantity(quantity: number) {
   }
 }
 
+function bounded(value: string, max: number, label: string, min = 0): string {
+  const trimmed = value.trim();
+  if (trimmed.length < min) throw new LedgerError(`${label} is required.`, "INVALID");
+  if (trimmed.length > max) {
+    throw new LedgerError(`${label} must be ${max} characters or fewer.`, "INVALID");
+  }
+  return trimmed;
+}
+
 export async function draftBatch(input: {
   projectId: string;
   vintageYear: number;
@@ -237,10 +256,7 @@ export async function draftBatch(input: {
 }) {
   assertVintage(input.vintageYear);
   assertQuantity(input.quantity);
-  const methodology = input.methodology.trim();
-  if (methodology.length < 3) {
-    throw new LedgerError("Methodology is required.", "INVALID");
-  }
+  const methodology = bounded(input.methodology, LIMITS.methodology, "Methodology", 3);
   const project = await prisma.project.findUnique({ where: { id: input.projectId } });
   if (!project) throw new LedgerError("Project not found.", "NOT_FOUND");
 
@@ -284,6 +300,9 @@ export async function approveBatch(batchId: string, actorId: string) {
       if (!batch || batch.status !== "DRAFT") {
         throw new LedgerError("Only a draft batch can be approved.", "INVALID");
       }
+      if (batch.draftedById === actorId) {
+        throw new LedgerError("A different admin must approve this draft.", "INVALID");
+      }
 
       const max = await tx.issuedSerialRange.aggregate({
         where: { projectId: batch.projectId },
@@ -306,8 +325,8 @@ export async function approveBatch(batchId: string, actorId: string) {
         ranges: [{ start: serialStart, end: serialEnd }],
       });
 
-      await tx.creditBatch.update({
-        where: { id: batch.id },
+      const updated = await tx.creditBatch.updateMany({
+        where: { id: batch.id, status: "DRAFT" },
         data: {
           status: "APPROVED",
           serialStart,
@@ -316,6 +335,9 @@ export async function approveBatch(batchId: string, actorId: string) {
           approvedAt: new Date(),
         },
       });
+      if (updated.count !== 1) {
+        throw new LedgerError("Only a draft batch can be approved.", "INVALID");
+      }
       await writeAudit(tx, {
         actorId,
         action: "batch.approved",
@@ -331,31 +353,35 @@ export async function approveBatch(batchId: string, actorId: string) {
 }
 
 export async function rejectBatch(batchId: string, actorId: string, note: string) {
-  const rejectionNote = note.trim();
-  if (rejectionNote.length < 3) {
-    throw new LedgerError("A rejection note is required.", "INVALID");
+  const rejectionNote = bounded(note, LIMITS.rejectionNote, "A rejection note", 3);
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const existing = await tx.creditBatch.findUnique({ where: { id: batchId } });
+      if (!existing) throw new LedgerError("Batch not found.", "NOT_FOUND");
+      await lockIssue(tx, existing.projectId);
+      const updated = await tx.creditBatch.updateMany({
+        where: { id: batchId, status: "DRAFT" },
+        data: {
+          status: "REJECTED",
+          rejectedById: actorId,
+          rejectedAt: new Date(),
+          rejectionNote,
+        },
+      });
+      if (updated.count !== 1) {
+        throw new LedgerError("Only a draft batch can be rejected.", "INVALID");
+      }
+      await writeAudit(tx, {
+        actorId,
+        action: "batch.rejected",
+        entityType: "CreditBatch",
+        entityId: batchId,
+        detail: { rejectionNote },
+      });
+    }, TX_OPTIONS);
+  } catch (error) {
+    rethrow(error);
   }
-  return prisma.$transaction(async (tx) => {
-    const updated = await tx.creditBatch.updateMany({
-      where: { id: batchId, status: "DRAFT" },
-      data: {
-        status: "REJECTED",
-        rejectedById: actorId,
-        rejectedAt: new Date(),
-        rejectionNote,
-      },
-    });
-    if (updated.count !== 1) {
-      throw new LedgerError("Only a draft batch can be rejected.", "INVALID");
-    }
-    await writeAudit(tx, {
-      actorId,
-      action: "batch.rejected",
-      entityType: "CreditBatch",
-      entityId: batchId,
-      detail: { rejectionNote },
-    });
-  });
 }
 
 type MoveInput = {
@@ -438,8 +464,10 @@ async function moveFromAsset(
 export async function transferCredits(
   input: MoveInput & { toAccountId: string; memo?: string },
 ) {
+  const memo = input.memo === undefined ? undefined : bounded(input.memo, LIMITS.memo, "A memo");
   return moveFromAsset({
     ...input,
+    memo: memo || undefined,
     type: "TRANSFER",
     auditAction: "ledger.transfer",
   });
@@ -448,10 +476,8 @@ export async function transferCredits(
 export async function retireCredits(
   input: MoveInput & { beneficiary: string; reason: string },
 ) {
-  const beneficiary = input.beneficiary.trim();
-  const reason = input.reason.trim();
-  if (beneficiary.length < 2) throw new LedgerError("A beneficiary is required.", "INVALID");
-  if (reason.length < 2) throw new LedgerError("A retirement reason is required.", "INVALID");
+  const beneficiary = bounded(input.beneficiary, LIMITS.beneficiary, "A beneficiary", 2);
+  const reason = bounded(input.reason, LIMITS.reason, "A retirement reason", 2);
   const retirement = await prisma.account.findUnique({ where: { code: "RETIREMENT" } });
   if (!retirement) throw new LedgerError("Retirement account is missing.", "INVARIANT");
   return moveFromAsset({
@@ -466,8 +492,7 @@ export async function retireCredits(
 }
 
 export async function cancelCredits(input: MoveInput & { reason: string }) {
-  const reason = input.reason.trim();
-  if (reason.length < 2) throw new LedgerError("A cancellation reason is required.", "INVALID");
+  const reason = bounded(input.reason, LIMITS.reason, "A cancellation reason", 2);
   const cancellation = await prisma.account.findUnique({ where: { code: "CANCELLATION" } });
   if (!cancellation) throw new LedgerError("Cancellation account is missing.", "INVARIANT");
   return moveFromAsset({
@@ -475,7 +500,7 @@ export async function cancelCredits(input: MoveInput & { reason: string }) {
     reason,
     toAccountId: cancellation.id,
     type: "CANCELLATION",
-    memo: reason,
+    memo: reason.slice(0, LIMITS.memo),
     auditAction: "ledger.cancellation",
   });
 }

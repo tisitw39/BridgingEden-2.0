@@ -2,10 +2,19 @@ import { redirect } from "next/navigation";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/db";
 
-export async function requireUser() {
+async function actorFromSession() {
   const session = await auth();
-  if (!session?.user?.id) redirect("/login");
-  return session.user;
+  if (!session?.user?.id) return null;
+  return prisma.user.findUnique({
+    where: { id: session.user.id },
+    select: { id: true, email: true, name: true, role: true },
+  });
+}
+
+export async function requireUser() {
+  const user = await actorFromSession();
+  if (!user) redirect("/login");
+  return user;
 }
 
 export async function requireAdmin() {
@@ -15,6 +24,5 @@ export async function requireAdmin() {
 }
 
 export async function currentUser() {
-  const session = await auth();
-  return session?.user ?? null;
+  return actorFromSession();
 }

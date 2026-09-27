@@ -22,11 +22,14 @@ export default async function LoginPage({
         <LoginForm callbackUrl={callbackUrl} />
       </div>
       <p className="mt-4 text-center text-xs text-muted">Your data is kept private and never shared.</p>
-      <div className="mt-8 w-full rounded-2xl border border-line bg-pale p-4 text-sm text-muted">
-        <p className="font-mono text-[11px] uppercase tracking-[0.14em] text-forest">Local demo</p>
-        <p className="mt-2">Staff: admin@bridgingeden.ie · EdenAdmin!2026</p>
-        <p>Holder: aoife.brennan@example.com · HolderDemo!2026</p>
-      </div>
+      {process.env.NODE_ENV !== "production" ? (
+        <div className="mt-8 w-full rounded-2xl border border-line bg-pale p-4 text-sm text-muted">
+          <p className="font-mono text-[11px] uppercase tracking-[0.14em] text-forest">Local demo</p>
+          <p className="mt-2">Staff: admin@bridgingeden.ie · EdenAdmin!2026</p>
+          <p>Approver: ciara.nolan@bridgingeden.ie · EdenAdmin!2026</p>
+          <p>Holder: aoife.brennan@example.com · HolderDemo!2026</p>
+        </div>
+      ) : null}
     </div>
   );
 }

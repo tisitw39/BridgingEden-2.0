@@ -24,6 +24,7 @@ export function SiteHeader({ user }: { user: HeaderUser }) {
     { href: "/projects", label: "Projects" },
     { href: "/portfolio", label: "Portfolio" },
     ...(user?.role === "ADMIN" ? [{ href: "/admin", label: "Admin" }] : []),
+    ...(user ? [{ href: "/account", label: "Account" }] : []),
   ];
 
   return (

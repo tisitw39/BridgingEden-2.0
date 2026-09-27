@@ -1,7 +1,16 @@
 import { Prisma } from "@prisma/client";
 import { redirect } from "next/navigation";
 import { ZodError } from "zod";
+import { ERRORS, NOTICES, type ErrorCode, type NoticeCode } from "@/lib/flash";
 import { LedgerError } from "@/lib/ledger/errors";
+
+const LEDGER_CODES: Record<string, ErrorCode> = {
+  INSUFFICIENT: "insufficient",
+  OVERLAP: "overlap",
+  NOT_FOUND: "not_found",
+  INVALID: "invalid",
+  INVARIANT: "invariant",
+};
 
 export function isRedirectError(error: unknown): boolean {
   return (
@@ -12,19 +21,27 @@ export function isRedirectError(error: unknown): boolean {
   );
 }
 
-export function errorMessage(error: unknown, fallback: string): string {
+export function errorCode(error: unknown, fallback: ErrorCode): ErrorCode {
   if (isRedirectError(error)) throw error;
-  if (error instanceof LedgerError) return error.message;
-  if (error instanceof ZodError) return error.issues[0]?.message ?? fallback;
+  if (error instanceof LedgerError) return LEDGER_CODES[error.code] ?? fallback;
+  if (error instanceof ZodError) {
+    return error.issues.some((issue) => issue.code === "too_big") ? "text_too_long" : "form_invalid";
+  }
   if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
-    return "That value is already in use.";
+    return "already_used";
   }
   return fallback;
 }
 
-export function flashRedirect(path: string, kind: "error" | "notice", message: string): never {
+export function flashRedirect(path: string, kind: "error" | "notice", code: string): never {
   const [pathname, query = ""] = path.split("?");
   const params = new URLSearchParams(query);
-  params.set(kind, message);
+  if (kind === "notice") {
+    params.set("notice", code in NOTICES ? code : "saved");
+  } else {
+    params.set("error", code in ERRORS ? code : "form_invalid");
+  }
   redirect(`${pathname}?${params.toString()}`);
 }
+
+export type { ErrorCode, NoticeCode };

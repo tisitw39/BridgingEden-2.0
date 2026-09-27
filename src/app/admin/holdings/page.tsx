@@ -5,6 +5,7 @@ import { Field, Flash, PageTitle, inputClass, primaryButtonClass, secondaryButto
 import { prisma } from "@/lib/db";
 import { formatRanges, formatTonnes } from "@/lib/format";
 import { listHoldings } from "@/lib/ledger/queries";
+import { requireAdmin } from "@/lib/session";
 
 export const metadata: Metadata = { title: "Holdings" };
 
@@ -14,6 +15,7 @@ export default async function HoldingsPage({
   searchParams: Promise<{ error?: string; notice?: string }>;
 }) {
   const flash = await searchParams;
+  await requireAdmin();
   const [holdings, accounts, projects] = await Promise.all([
     listHoldings(),
     prisma.account.findMany({
@@ -107,7 +109,7 @@ export default async function HoldingsPage({
               </Field>
             </div>
             <Field label="Note">
-              <input className={inputClass} name="memo" />
+              <input className={inputClass} name="memo" maxLength={500} />
             </Field>
             <button className={primaryButtonClass} type="submit">
               Post transfer
@@ -135,7 +137,7 @@ export default async function HoldingsPage({
                 </Field>
               </div>
               <Field label="Reason">
-                <textarea className={inputClass} name="reason" rows={3} required />
+                <textarea className={inputClass} name="reason" rows={3} maxLength={2000} required />
               </Field>
               <button className={secondaryButtonClass} type="submit">
                 Cancel credits
@@ -153,7 +155,15 @@ export default async function HoldingsPage({
                 <input className={inputClass} name="email" type="email" required />
               </Field>
               <Field label="Password">
-                <input className={inputClass} name="password" type="text" minLength={8} required />
+                <input
+                  className={inputClass}
+                  name="password"
+                  type="password"
+                  autoComplete="new-password"
+                  minLength={8}
+                  maxLength={200}
+                  required
+                />
               </Field>
               <button className={primaryButtonClass} type="submit">
                 Create holder

@@ -3,7 +3,7 @@
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { saveDocuments } from "@/lib/documents";
-import { errorMessage, flashRedirect, isRedirectError } from "@/lib/http";
+import { errorCode, flashRedirect, isRedirectError } from "@/lib/http";
 import { requireAdmin } from "@/lib/session";
 
 const projectSchema = z.object({
@@ -32,11 +32,7 @@ export async function createProjectAction(formData: FormData) {
     description: formData.get("description"),
   });
   if (!parsed.success) {
-    flashRedirect(
-      "/admin/projects/new",
-      "error",
-      parsed.error.issues[0]?.message ?? "Check the form and try again.",
-    );
+    flashRedirect("/admin/projects/new", "error", errorCode(parsed.error, "form_invalid"));
   }
 
   try {
@@ -53,10 +49,10 @@ export async function createProjectAction(formData: FormData) {
         detail: { code: project.code, name: project.name },
       },
     });
-    flashRedirect(`/admin/projects/${project.id}`, "notice", "Project created.");
+    flashRedirect(`/admin/projects/${project.id}`, "notice", "project_created");
   } catch (error) {
     if (isRedirectError(error)) throw error;
-    flashRedirect("/admin/projects/new", "error", errorMessage(error, "The project could not be created."));
+    flashRedirect("/admin/projects/new", "error", errorCode(error, "project_failed"));
   }
 }
 
@@ -64,16 +60,12 @@ export async function uploadDocumentsAction(formData: FormData) {
   const admin = await requireAdmin();
   const projectId = String(formData.get("projectId") ?? "");
   const project = await prisma.project.findUnique({ where: { id: projectId } });
-  if (!project) flashRedirect("/admin/projects", "error", "Project not found.");
+  if (!project) flashRedirect("/admin/projects", "error", "project_missing");
   try {
     await saveDocuments(formData, projectId, admin.id);
-    flashRedirect(`/admin/projects/${projectId}`, "notice", "Documents added.");
+    flashRedirect(`/admin/projects/${projectId}`, "notice", "documents_added");
   } catch (error) {
     if (isRedirectError(error)) throw error;
-    flashRedirect(
-      `/admin/projects/${projectId}`,
-      "error",
-      errorMessage(error, "The documents could not be uploaded."),
-    );
+    flashRedirect(`/admin/projects/${projectId}`, "error", errorCode(error, "documents_failed"));
   }
 }

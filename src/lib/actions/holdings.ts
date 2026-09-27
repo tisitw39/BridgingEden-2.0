@@ -3,15 +3,20 @@
 import { hash } from "bcryptjs";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
-import { errorMessage, flashRedirect, isRedirectError } from "@/lib/http";
+import { errorCode, flashRedirect, isRedirectError } from "@/lib/http";
+import { LIMITS } from "@/lib/limits";
+import { BCRYPT_COST } from "@/lib/passwords";
 import { ensureHolderAccount, cancelCredits, transferCredits } from "@/lib/ledger/service";
 import { requireAdmin } from "@/lib/session";
 
 const holderSchema = z.object({
   name: z.string().trim().min(2, "Enter the holder's name.").max(120),
   email: z.string().trim().email("Enter a valid email.").transform((value) => value.toLowerCase()),
-  password: z.string().min(8, "Use a password of at least 8 characters.").max(200),
+  password: z.string().min(8, "Use a password of at least 8 characters.").max(LIMITS.password),
 });
+
+const memoSchema = z.string().trim().max(LIMITS.memo);
+const reasonSchema = z.string().trim().min(2).max(LIMITS.reason);
 
 function movement(formData: FormData) {
   const start = String(formData.get("serialStart") ?? "").trim();
@@ -30,14 +35,10 @@ export async function createHolderAction(formData: FormData) {
     password: formData.get("password"),
   });
   if (!parsed.success) {
-    flashRedirect(
-      "/admin/holdings",
-      "error",
-      parsed.error.issues[0]?.message ?? "Check the holder details.",
-    );
+    flashRedirect("/admin/holdings", "error", errorCode(parsed.error, "form_invalid"));
   }
   try {
-    const passwordHash = await hash(parsed.data.password, 10);
+    const passwordHash = await hash(parsed.data.password, BCRYPT_COST);
     const user = await prisma.user.create({
       data: {
         name: parsed.data.name,
@@ -56,50 +57,50 @@ export async function createHolderAction(formData: FormData) {
         detail: { email: user.email, name: user.name },
       },
     });
-    flashRedirect("/admin/holdings", "notice", `Holder account created for ${user.email}.`);
+    flashRedirect("/admin/holdings", "notice", "holder_created");
   } catch (error) {
     if (isRedirectError(error)) throw error;
-    flashRedirect("/admin/holdings", "error", errorMessage(error, "The holder could not be created."));
+    flashRedirect("/admin/holdings", "error", errorCode(error, "holder_failed"));
   }
 }
 
 export async function transferAction(formData: FormData) {
   const admin = await requireAdmin();
+  const memo = memoSchema.safeParse(String(formData.get("memo") ?? ""));
+  if (!memo.success) flashRedirect("/admin/holdings", "error", errorCode(memo.error, "form_invalid"));
   try {
-    const result = await transferCredits({
+    await transferCredits({
       fromAccountId: String(formData.get("fromAccountId") ?? ""),
       toAccountId: String(formData.get("toAccountId") ?? ""),
       projectId: String(formData.get("projectId") ?? ""),
       vintageYear: Number(String(formData.get("vintageYear") ?? "").trim()),
       actorId: admin.id,
-      memo: String(formData.get("memo") ?? "").trim() || undefined,
+      memo: memo.data || undefined,
       ...movement(formData),
     });
-    flashRedirect(
-      "/admin/holdings",
-      "notice",
-      `Transferred ${result.quantity} tonnes.`,
-    );
+    flashRedirect("/admin/holdings", "notice", "transferred");
   } catch (error) {
     if (isRedirectError(error)) throw error;
-    flashRedirect("/admin/holdings", "error", errorMessage(error, "The transfer could not be posted."));
+    flashRedirect("/admin/holdings", "error", errorCode(error, "transfer_failed"));
   }
 }
 
 export async function cancelAction(formData: FormData) {
   const admin = await requireAdmin();
+  const reason = reasonSchema.safeParse(formData.get("reason"));
+  if (!reason.success) flashRedirect("/admin/holdings", "error", errorCode(reason.error, "form_invalid"));
   try {
-    const result = await cancelCredits({
+    await cancelCredits({
       fromAccountId: String(formData.get("fromAccountId") ?? ""),
       projectId: String(formData.get("projectId") ?? ""),
       vintageYear: Number(String(formData.get("vintageYear") ?? "").trim()),
-      reason: String(formData.get("reason") ?? ""),
+      reason: reason.data,
       actorId: admin.id,
       ...movement(formData),
     });
-    flashRedirect("/admin/holdings", "notice", `Cancelled ${result.quantity} tonnes.`);
+    flashRedirect("/admin/holdings", "notice", "cancelled");
   } catch (error) {
     if (isRedirectError(error)) throw error;
-    flashRedirect("/admin/holdings", "error", errorMessage(error, "The cancellation could not be posted."));
+    flashRedirect("/admin/holdings", "error", errorCode(error, "cancel_failed"));
   }
 }

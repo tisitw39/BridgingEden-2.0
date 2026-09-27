@@ -1,8 +1,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { hash } from "bcryptjs";
+import { PDFDocument } from "pdf-lib";
 import { prisma } from "@/lib/db";
 import { buildRetirementCertificate } from "@/lib/certificate";
 import { listHoldings } from "@/lib/ledger/queries";
+import { loadRetirementVerification } from "@/lib/verify";
+import { ownerPrisma } from "./owner-db";
+import { resetTransactionalData } from "./reset-db";
 import {
   approveBatch,
   cancelCredits,
@@ -17,23 +21,10 @@ import {
 import { LedgerError } from "@/lib/ledger/errors";
 
 let adminId = "";
+let approverId = "";
 let holderId = "";
 let holderAccountId = "";
 let otherHolderAccountId = "";
-
-async function resetTransactionalData() {
-  await prisma.$executeRawUnsafe(`
-    TRUNCATE TABLE
-      audit_logs,
-      issued_serial_ranges,
-      ledger_postings,
-      ledger_events,
-      credit_batches,
-      project_documents,
-      projects
-    RESTART IDENTITY CASCADE
-  `);
-}
 
 async function makeProject(code = "TEST") {
   return prisma.project.create({
@@ -57,7 +48,7 @@ async function issue(projectId: string, quantity: number, vintageYear = 2024) {
     methodology: "Native Woodland Establishment",
     actorId: adminId,
   });
-  return approveBatch(batch.id, adminId);
+  return approveBatch(batch.id, approverId);
 }
 
 async function inventoryId() {
@@ -74,9 +65,9 @@ describe("ledger database rules", () => {
 
     await ensureSystemAccounts();
     const passwordHash = await hash("password123", 4);
-    const admin = await prisma.user.upsert({
+    const admin = await ownerPrisma.user.upsert({
       where: { email: "ledger-admin@test.local" },
-      update: {},
+      update: { role: "ADMIN" },
       create: {
         email: "ledger-admin@test.local",
         name: "Ledger Admin",
@@ -84,9 +75,19 @@ describe("ledger database rules", () => {
         role: "ADMIN",
       },
     });
-    const holder = await prisma.user.upsert({
+    const approver = await ownerPrisma.user.upsert({
+      where: { email: "ledger-approver@test.local" },
+      update: { role: "ADMIN" },
+      create: {
+        email: "ledger-approver@test.local",
+        name: "Ledger Approver",
+        passwordHash,
+        role: "ADMIN",
+      },
+    });
+    const holder = await ownerPrisma.user.upsert({
       where: { email: "ledger-holder@test.local" },
-      update: {},
+      update: { role: "HOLDER" },
       create: {
         email: "ledger-holder@test.local",
         name: "Ledger Holder",
@@ -94,9 +95,9 @@ describe("ledger database rules", () => {
         role: "HOLDER",
       },
     });
-    const other = await prisma.user.upsert({
+    const other = await ownerPrisma.user.upsert({
       where: { email: "ledger-other@test.local" },
-      update: {},
+      update: { role: "HOLDER" },
       create: {
         email: "ledger-other@test.local",
         name: "Other Holder",
@@ -107,6 +108,7 @@ describe("ledger database rules", () => {
     const holderAccount = await ensureHolderAccount(prisma, holder);
     const otherAccount = await ensureHolderAccount(prisma, other);
     adminId = admin.id;
+    approverId = approver.id;
     holderId = holder.id;
     holderAccountId = holderAccount.id;
     otherHolderAccountId = otherAccount.id;
@@ -118,6 +120,7 @@ describe("ledger database rules", () => {
 
   afterAll(async () => {
     await prisma.$disconnect();
+    await ownerPrisma.$disconnect();
   });
 
   it("assigns a unique serial range on approval and derives the inventory balance", async () => {
@@ -441,11 +444,18 @@ describe("ledger database rules", () => {
     const audit = await prisma.auditLog.findFirstOrThrow();
     await expect(
       prisma.ledgerPosting.update({ where: { id: posting.id }, data: { quantity: 1 } }),
-    ).rejects.toThrow(/append-only/);
-    await expect(prisma.ledgerPosting.delete({ where: { id: posting.id } })).rejects.toThrow(/append-only/);
-    await expect(prisma.ledgerEvent.delete({ where: { id: event.id } })).rejects.toThrow(/append-only/);
+    ).rejects.toThrow(/permission denied|append-only/);
+    await expect(prisma.ledgerPosting.delete({ where: { id: posting.id } })).rejects.toThrow(
+      /permission denied|append-only/,
+    );
+    await expect(prisma.ledgerEvent.delete({ where: { id: event.id } })).rejects.toThrow(
+      /permission denied|append-only/,
+    );
     await expect(
       prisma.auditLog.update({ where: { id: audit.id }, data: { action: "tamper" } }),
+    ).rejects.toThrow(/permission denied|append-only/);
+    await expect(
+      ownerPrisma.ledgerPosting.update({ where: { id: posting.id }, data: { quantity: 1 } }),
     ).rejects.toThrow(/append-only/);
     expect(await reconcile()).toMatchObject({ ok: true, issued: 4, held: 4 });
   });
@@ -479,5 +489,141 @@ describe("ledger database rules", () => {
     const held = (await listHoldings()).reduce((sum, row) => sum + row.quantity, 0);
     expect(held).toBe(40);
     expect(await reconcile()).toMatchObject({ ok: true, issued: 40, held: 40 });
+  });
+
+  it("requires a different admin to approve a draft", async () => {
+    const project = await makeProject("EYES");
+    const draft = await draftBatch({
+      projectId: project.id,
+      vintageYear: 2024,
+      quantity: 12,
+      methodology: "Native Woodland Establishment",
+      actorId: adminId,
+    });
+    await expect(approveBatch(draft.id, adminId)).rejects.toThrow(/different admin/);
+    const issued = await approveBatch(draft.id, approverId);
+    expect(issued).toMatchObject({ serialStart: 1, serialEnd: 12, quantity: 12 });
+    const row = await prisma.creditBatch.findUniqueOrThrow({ where: { id: draft.id } });
+    expect(row.approvedById).toBe(approverId);
+    expect(row.draftedById).toBe(adminId);
+  });
+
+  it("lets only one of approve or reject win a race", async () => {
+    const project = await makeProject("RACE");
+    const draft = await draftBatch({
+      projectId: project.id,
+      vintageYear: 2024,
+      quantity: 9,
+      methodology: "Native Woodland Establishment",
+      actorId: adminId,
+    });
+    const results = await Promise.allSettled([
+      approveBatch(draft.id, approverId),
+      rejectBatch(draft.id, adminId, "Superseded by a corrected boundary."),
+    ]);
+    const fulfilled = results.filter((result) => result.status === "fulfilled");
+    expect(fulfilled).toHaveLength(1);
+    const batch = await prisma.creditBatch.findUniqueOrThrow({ where: { id: draft.id } });
+    const events = await prisma.ledgerEvent.count({ where: { projectId: project.id } });
+    if (batch.status === "APPROVED") {
+      expect(events).toBe(1);
+      expect(batch.serialStart).toBe(1);
+    } else {
+      expect(batch.status).toBe("REJECTED");
+      expect(events).toBe(0);
+    }
+    expect((await reconcile()).ok).toBe(true);
+  });
+
+  it("lets only one of retire or transfer spend the same holding", async () => {
+    const project = await makeProject("SPEND");
+    await issue(project.id, 10);
+    await transferCredits({
+      fromAccountId: await inventoryId(),
+      toAccountId: holderAccountId,
+      projectId: project.id,
+      vintageYear: 2024,
+      quantity: 10,
+      actorId: adminId,
+    });
+    const results = await Promise.allSettled([
+      retireCredits({
+        fromAccountId: holderAccountId,
+        projectId: project.id,
+        vintageYear: 2024,
+        quantity: 10,
+        beneficiary: "Northwind Office Ltd",
+        reason: "Annual inventory",
+        actorId: holderId,
+      }),
+      transferCredits({
+        fromAccountId: holderAccountId,
+        toAccountId: otherHolderAccountId,
+        projectId: project.id,
+        vintageYear: 2024,
+        quantity: 10,
+        actorId: adminId,
+      }),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const held = (await listHoldings()).reduce((sum, row) => sum + row.quantity, 0);
+    const reconciliation = await reconcile();
+    expect(reconciliation.ok).toBe(true);
+    expect(reconciliation.issued).toBe(10);
+    expect(held + reconciliation.retired).toBe(10);
+    expect(reconciliation.held).toBe(held);
+  });
+
+  it("rejects text that exceeds the ledger limits", async () => {
+    const project = await makeProject("LONG");
+    await issue(project.id, 4);
+    await expect(
+      retireCredits({
+        fromAccountId: await inventoryId(),
+        projectId: project.id,
+        vintageYear: 2024,
+        quantity: 1,
+        beneficiary: "N".repeat(201),
+        reason: "A reason",
+        actorId: holderId,
+      }),
+    ).rejects.toMatchObject({ code: "INVALID" });
+  });
+
+  it("builds a multi-page certificate that can be verified in public", async () => {
+    const project = await makeProject("CERT");
+    await issue(project.id, 6);
+    await transferCredits({
+      fromAccountId: await inventoryId(),
+      toAccountId: holderAccountId,
+      projectId: project.id,
+      vintageYear: 2024,
+      quantity: 6,
+      actorId: adminId,
+    });
+    const retired = await retireCredits({
+      fromAccountId: holderAccountId,
+      projectId: project.id,
+      vintageYear: 2024,
+      quantity: 2,
+      beneficiary: "Córas – Northwind",
+      reason: "word ".repeat(400),
+      actorId: holderId,
+    });
+    const pdf = await buildRetirementCertificate(retired.eventId);
+    expect(pdf).toBeTruthy();
+    const document = await PDFDocument.load(pdf!);
+    expect(document.getPageCount()).toBeGreaterThan(1);
+    const verified = await loadRetirementVerification(retired.eventId);
+    expect(verified).toMatchObject({
+      status: "Retired",
+      projectCode: "CERT",
+      vintageYear: 2024,
+      quantity: 2,
+      beneficiary: "Córas – Northwind",
+    });
+    expect(verified?.serials[0]).toContain("–");
+    expect(await loadRetirementVerification("not-a-retirement")).toBeNull();
   });
 });

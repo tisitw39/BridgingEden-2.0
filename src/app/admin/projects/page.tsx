@@ -3,10 +3,12 @@ import Link from "next/link";
 import { prisma } from "@/lib/db";
 import { primaryButtonClass } from "@/components/ui";
 import { PageTitle } from "@/components/ui";
+import { requireAdmin } from "@/lib/session";
 
 export const metadata: Metadata = { title: "Projects" };
 
 export default async function AdminProjectsPage() {
+  await requireAdmin();
   const projects = await prisma.project.findMany({
     orderBy: { createdAt: "desc" },
     include: { _count: { select: { batches: true, documents: true } } },

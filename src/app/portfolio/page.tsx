@@ -218,11 +218,11 @@ export default async function PortfolioPage({
             </label>
             <label className="block">
               <span className="mb-1.5 block font-mono text-[11px] uppercase tracking-[0.14em] text-muted">Beneficiary</span>
-              <input className={inputClass} name="beneficiary" required />
+              <input className={inputClass} name="beneficiary" maxLength={200} required />
             </label>
             <label className="block md:col-span-2">
               <span className="mb-1.5 block font-mono text-[11px] uppercase tracking-[0.14em] text-muted">Reason</span>
-              <textarea className={inputClass} name="reason" rows={3} required />
+              <textarea className={inputClass} name="reason" rows={3} maxLength={2000} required />
             </label>
             <div className="md:col-span-2">
               <button className={primaryButtonClass} type="submit">
@@ -268,9 +268,14 @@ export default async function PortfolioPage({
                           <p className="mt-1 text-muted">Beneficiary: {event.beneficiary}</p>
                         ) : null}
                         {event.type === "RETIREMENT" ? (
-                          <a className="mt-1 inline-block text-forest underline" href={`/api/certificates/${event.id}`}>
-                            Download certificate
-                          </a>
+                          <span className="mt-1 flex flex-wrap gap-3">
+                            <a className="text-forest underline" href={`/api/certificates/${event.id}`}>
+                              Download certificate
+                            </a>
+                            <a className="text-forest underline" href={`/verify/${event.id}`}>
+                              Verification page
+                            </a>
+                          </span>
                         ) : null}
                       </td>
                       <td className="py-3">{formatTonnes(movement.quantity)}</td>

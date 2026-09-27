@@ -6,12 +6,14 @@ import { uploadDocumentsAction } from "@/lib/actions/projects";
 import { Field, Flash, inputClass, primaryButtonClass, secondaryButtonClass } from "@/components/ui";
 import { prisma } from "@/lib/db";
 import { formatSerialRange, formatTonnes, formatWhen } from "@/lib/format";
+import { requireAdmin } from "@/lib/session";
 
 export async function generateMetadata({
   params,
 }: {
   params: Promise<{ id: string }>;
 }): Promise<Metadata> {
+  await requireAdmin();
   const { id } = await params;
   const project = await prisma.project.findUnique({ where: { id }, select: { name: true } });
   return { title: project?.name ?? "Project" };
@@ -26,6 +28,7 @@ export default async function AdminProjectPage({
 }) {
   const { id } = await params;
   const flash = await searchParams;
+  await requireAdmin();
   const project = await prisma.project.findUnique({
     where: { id },
     include: {
@@ -62,7 +65,7 @@ export default async function AdminProjectPage({
         <section className="rounded-2xl border border-line bg-white p-6">
           <h2 className="font-serif text-2xl">Draft a credit batch</h2>
           <p className="mt-2 text-sm text-muted">
-            A draft does not touch the ledger. Approval, as a second step, assigns the serial range.
+            A draft does not touch the ledger. A different admin approves it and assigns the serial range.
           </p>
           <form action={draftBatchAction} className="mt-5 space-y-4">
             <input type="hidden" name="projectId" value={project.id} />
@@ -75,7 +78,7 @@ export default async function AdminProjectPage({
               </Field>
             </div>
             <Field label="Methodology">
-              <input className={inputClass} name="methodology" defaultValue={project.methodology} required />
+              <input className={inputClass} name="methodology" defaultValue={project.methodology} maxLength={200} required />
             </Field>
             <button className={primaryButtonClass} type="submit">
               Save draft
@@ -100,7 +103,8 @@ export default async function AdminProjectPage({
           </ul>
           <form action={uploadDocumentsAction} className="mt-5 space-y-3">
             <input type="hidden" name="projectId" value={project.id} />
-            <input className={inputClass} name="documents" type="file" multiple required />
+            <input className={inputClass} name="documents" type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.txt,.csv" required />
+            <p className="text-xs text-muted">Up to 2 files, 1.5 MB each.</p>
             <button className={secondaryButtonClass} type="submit">
               Upload
             </button>

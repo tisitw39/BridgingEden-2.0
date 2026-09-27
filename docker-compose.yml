@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: bridgingeden
       POSTGRES_DB: bridgingeden
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - bridgingeden-pg:/var/lib/postgresql/data
       - ./docker/init.sql:/docker-entrypoint-initdb.d/001-init.sql

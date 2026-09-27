@@ -4,10 +4,12 @@ import { prisma } from "@/lib/db";
 import { formatTonnes } from "@/lib/format";
 import { reconcile } from "@/lib/ledger/service";
 import { PageTitle, Panel } from "@/components/ui";
+import { requireAdmin } from "@/lib/session";
 
 export const metadata: Metadata = { title: "Admin" };
 
 export default async function AdminHomePage() {
+  await requireAdmin();
   const [projects, drafts, holders, reconciliation] = await Promise.all([
     prisma.project.count(),
     prisma.creditBatch.count({ where: { status: "DRAFT" } }),

@@ -1,10 +1,15 @@
 import type { NextConfig } from "next";
+import { MAX_ACTION_BODY } from "./src/lib/limits";
+import { securityHeaders } from "./src/lib/security-headers";
 
 const nextConfig: NextConfig = {
   experimental: {
     serverActions: {
-      bodySizeLimit: "12mb",
+      bodySizeLimit: MAX_ACTION_BODY,
     },
+  },
+  async headers() {
+    return [{ source: "/:path*", headers: securityHeaders() }];
   },
 };
 

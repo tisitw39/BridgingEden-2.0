@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { createProjectAction } from "@/lib/actions/projects";
 import { Field, Flash, PageTitle, inputClass, primaryButtonClass } from "@/components/ui";
+import { requireAdmin } from "@/lib/session";
 
 export const metadata: Metadata = { title: "New project" };
 
@@ -10,6 +11,7 @@ export default async function NewProjectPage({
   searchParams: Promise<{ error?: string }>;
 }) {
   const flash = await searchParams;
+  await requireAdmin();
   return (
     <div className="max-w-2xl">
       <PageTitle
@@ -31,7 +33,7 @@ export default async function NewProjectPage({
           <input className={inputClass} name="location" placeholder="Glenmalure, Co. Wicklow, Ireland" required />
         </Field>
         <Field label="Methodology">
-          <input className={inputClass} name="methodology" required />
+          <input className={inputClass} name="methodology" maxLength={200} required />
         </Field>
         <Field label="Standard or registry reference">
           <input className={inputClass} name="standardReference" required />
@@ -39,7 +41,7 @@ export default async function NewProjectPage({
         <Field label="Description">
           <textarea className={inputClass} name="description" rows={5} required />
         </Field>
-        <Field label="Supporting documents">
+        <Field label="Supporting documents, up to 2 files, 1.5 MB each">
           <input className={inputClass} name="documents" type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.txt,.csv" />
         </Field>
         <button className={primaryButtonClass} type="submit">

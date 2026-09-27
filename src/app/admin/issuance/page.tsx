@@ -4,6 +4,7 @@ import { approveBatchAction, rejectBatchAction } from "@/lib/actions/issuance";
 import { Flash, PageTitle, inputClass, primaryButtonClass, secondaryButtonClass } from "@/components/ui";
 import { prisma } from "@/lib/db";
 import { formatSerialRange, formatTonnes, formatWhen } from "@/lib/format";
+import { requireAdmin } from "@/lib/session";
 
 export const metadata: Metadata = { title: "Issuance" };
 
@@ -13,6 +14,7 @@ export default async function IssuancePage({
   searchParams: Promise<{ error?: string; notice?: string }>;
 }) {
   const flash = await searchParams;
+  const admin = await requireAdmin();
   const [drafts, history] = await Promise.all([
     prisma.creditBatch.findMany({
       where: { status: "DRAFT" },
@@ -32,7 +34,7 @@ export default async function IssuancePage({
       <PageTitle
         eyebrow="Second step"
         title="Issuance"
-        lede="Approval assigns the next serial numbers for the project and posts a balanced issuance to the ledger. Rejection leaves the ledger unchanged."
+        lede="A different admin from the drafter approves the batch. Approval assigns the next serial numbers and posts a balanced issuance. Rejection leaves the ledger unchanged."
       />
       <Flash error={flash.error} notice={flash.notice} />
 
@@ -58,15 +60,19 @@ export default async function IssuancePage({
               <p className="font-serif text-4xl text-forest">{formatTonnes(batch.quantity)}</p>
             </div>
             <div className="mt-6 flex flex-col gap-4 lg:flex-row lg:items-end">
-              <form action={approveBatchAction}>
-                <input type="hidden" name="batchId" value={batch.id} />
-                <button className={primaryButtonClass} type="submit">
-                  Approve and issue →
-                </button>
-              </form>
+              {batch.draftedById === admin.id ? (
+                <p className="text-sm text-muted">Another admin must approve this draft.</p>
+              ) : (
+                <form action={approveBatchAction}>
+                  <input type="hidden" name="batchId" value={batch.id} />
+                  <button className={primaryButtonClass} type="submit">
+                    Approve and issue →
+                  </button>
+                </form>
+              )}
               <form action={rejectBatchAction} className="flex flex-1 flex-col gap-2 sm:flex-row sm:items-center">
                 <input type="hidden" name="batchId" value={batch.id} />
-                <input className={inputClass} name="note" placeholder="Reason for rejection" required />
+                <input className={inputClass} name="note" placeholder="Reason for rejection" maxLength={2000} required />
                 <button className={secondaryButtonClass} type="submit">
                   Reject
                 </button>

@@ -2,10 +2,12 @@ import type { Metadata } from "next";
 import { PageTitle } from "@/components/ui";
 import { prisma } from "@/lib/db";
 import { formatWhen } from "@/lib/format";
+import { requireAdmin } from "@/lib/session";
 
 export const metadata: Metadata = { title: "Audit" };
 
 export default async function AuditPage() {
+  await requireAdmin();
   const entries = await prisma.auditLog.findMany({
     include: { actor: { select: { name: true, email: true } } },
     orderBy: { createdAt: "desc" },

@@ -4,6 +4,7 @@ import { Flash, PageTitle, inputClass, secondaryButtonClass } from "@/components
 import { prisma } from "@/lib/db";
 import { formatSerialRange, formatTonnes, formatWhen } from "@/lib/format";
 import { listEvents, movementOf } from "@/lib/ledger/queries";
+import { requireAdmin } from "@/lib/session";
 
 export const metadata: Metadata = { title: "Ledger" };
 
@@ -22,6 +23,7 @@ export default async function LedgerPage({
   }>;
 }) {
   const filters = await searchParams;
+  await requireAdmin();
   const type = types.find((value) => value === filters.type);
   const vintageYear = filters.vintageYear ? Number(filters.vintageYear) : undefined;
   const [events, projects, accounts] = await Promise.all([

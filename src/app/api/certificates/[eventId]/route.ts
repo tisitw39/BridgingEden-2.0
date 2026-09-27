@@ -5,7 +5,12 @@ import { prisma } from "@/lib/db";
 
 export async function GET(_request: Request, context: { params: Promise<{ eventId: string }> }) {
   const session = await auth();
-  if (!session?.user) return new NextResponse("Sign in required", { status: 401 });
+  if (!session?.user?.id) return new NextResponse("Sign in required", { status: 401 });
+  const actor = await prisma.user.findUnique({
+    where: { id: session.user.id },
+    select: { id: true, role: true },
+  });
+  if (!actor) return new NextResponse("Sign in required", { status: 401 });
   const { eventId } = await context.params;
   const event = await prisma.ledgerEvent.findUnique({
     where: { id: eventId },
@@ -13,9 +18,9 @@ export async function GET(_request: Request, context: { params: Promise<{ eventI
   });
   if (!event || event.type !== "RETIREMENT") return new NextResponse("Not found", { status: 404 });
   const ownsIt = event.postings.some(
-    (posting) => posting.side === "CREDIT" && posting.account.userId === session.user.id,
+    (posting) => posting.side === "CREDIT" && posting.account.userId === actor.id,
   );
-  if (session.user.role !== "ADMIN" && !ownsIt) {
+  if (actor.role !== "ADMIN" && !ownsIt) {
     return new NextResponse("Not found", { status: 404 });
   }
   const pdf = await buildRetirementCertificate(eventId);
@@ -25,6 +30,7 @@ export async function GET(_request: Request, context: { params: Promise<{ eventI
       "Content-Type": "application/pdf",
       "Content-Disposition": `attachment; filename="bridging-eden-retirement-${eventId}.pdf"`,
       "Cache-Control": "private, no-store",
+      "X-Content-Type-Options": "nosniff",
     },
   });
 }
