@@ -7,8 +7,9 @@
 #   2. creates bridgingeden and bridgingeden_test as the superuser
 #   3. runs the SQL again on each database for btree_gist and the grants
 #
-# Passwords are generated here and are not printed. On GitHub Actions they are
-# appended to GITHUB_ENV. Locally they are written to /tmp/ci-database.env.
+# Passwords are generated here. On GitHub Actions each secret is registered with
+# ::add-mask:: before it is written to GITHUB_ENV, so the run log redacts it.
+# Locally the values are written to /tmp/ci-database.env and are not printed.
 set -eu
 
 OWNER_PW="$(openssl rand -hex 24)"
@@ -19,6 +20,14 @@ AUTH_SECRET_VALUE="$(openssl rand -hex 32)"
 if [ "$OWNER_PW" = "bridgingeden_owner" ] || [ "$APP_PW" = "bridgingeden_app" ]; then
   echo "Refusing generated passwords that equal the role names." >&2
   exit 1
+fi
+
+if [ -n "${GITHUB_ENV:-}" ]; then
+  # Mask before any later step can print a URL or env dump that contains them.
+  printf '%s\n' "::add-mask::${OWNER_PW}"
+  printf '%s\n' "::add-mask::${APP_PW}"
+  printf '%s\n' "::add-mask::${HMAC_KEY}"
+  printf '%s\n' "::add-mask::${AUTH_SECRET_VALUE}"
 fi
 
 PGHOST="${PGHOST:-127.0.0.1}"

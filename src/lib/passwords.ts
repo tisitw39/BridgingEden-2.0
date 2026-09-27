@@ -18,12 +18,21 @@ export async function revokeSessions(userId: string) {
   });
 }
 
+export const ADMIN_PASSWORD_MIN = 12;
+export const HOLDER_PASSWORD_MIN = 8;
+
 export async function changePassword(userId: string, currentPassword: string, newPassword: string) {
-  if (newPassword.length < 8 || newPassword.length > LIMITS.password) {
-    throw new LedgerError("Use a password of 8 to 200 characters.", "INVALID");
-  }
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) throw new LedgerError("Account not found.", "NOT_FOUND");
+  const min = user.role === "ADMIN" ? ADMIN_PASSWORD_MIN : HOLDER_PASSWORD_MIN;
+  if (newPassword.length < min || newPassword.length > LIMITS.password) {
+    throw new LedgerError(
+      user.role === "ADMIN"
+        ? "Admin passwords must be at least 12 characters."
+        : "Use a password of 8 to 200 characters.",
+      "INVALID",
+    );
+  }
   const matches = await compare(currentPassword, user.passwordHash);
   if (!matches) throw new LedgerError("The current password is incorrect.", "INVALID");
   if (currentPassword === newPassword) {

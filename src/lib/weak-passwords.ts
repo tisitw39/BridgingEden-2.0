@@ -1,55 +1,24 @@
-// Offline list of common breached passwords. No network call.
-const COMMON_PASSWORDS = new Set([
-  "12345678",
-  "123456789",
-  "1234567890",
-  "1q2w3e4r",
-  "1qaz2wsx",
-  "abc12345",
-  "access14",
-  "admin123",
-  "admin1234",
-  "ashley12",
-  "bailey12",
-  "baseball",
-  "batman12",
-  "changeme",
-  "charlie1",
-  "chelsea1",
-  "dragon12",
-  "football",
-  "freedom1",
-  "hello123",
-  "iloveyou",
-  "jennifer",
-  "letmein1",
-  "liverpool",
-  "login123",
-  "master12",
-  "michael1",
-  "monkey123",
-  "mustang1",
-  "passw0rd",
-  "password",
-  "password1",
-  "password12",
-  "password123",
-  "princess",
-  "qwerty123",
-  "qwertyui",
-  "qwertyuiop",
-  "shadow12",
-  "starwars",
-  "sunshine",
-  "superman",
-  "trustno1",
-  "welcome1",
-  "whatever",
-  "zaq12wsx",
-]);
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
+// Offline copy of the xato top-100000 list from SecLists (MIT). No network call.
+const LIST_PATH = path.join(process.cwd(), "src/lib/common-passwords.txt");
+
+let common: Set<string> | undefined;
+
+export function commonPasswords(): Set<string> {
+  if (!common) {
+    const words = readFileSync(LIST_PATH, "utf8")
+      .split(/\r?\n/)
+      .map((line) => line.trim().toLowerCase())
+      .filter(Boolean);
+    common = new Set(words);
+  }
+  return common;
+}
 
 export function weakPasswordMessage(password: string): string | null {
-  if (COMMON_PASSWORDS.has(password.toLowerCase())) {
+  if (commonPasswords().has(password.toLowerCase())) {
     return "That password is too common. Choose one that is not on a known breach list.";
   }
   return null;

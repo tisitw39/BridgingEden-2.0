@@ -310,6 +310,10 @@ describe("authentication and authorisation", () => {
     await expect(changePassword(holderId, "HolderDemo!2026", "password123")).rejects.toThrow(/too common/);
   });
 
+  it("requires at least 12 characters when an admin changes a password", async () => {
+    await expect(changePassword(adminId, "HolderDemo!2026", "Short!12345")).rejects.toThrow(/at least 12/);
+  });
+
   it("changes a password with one hash and then accepts only the new one", async () => {
     await changePassword(holderId, "HolderDemo!2026", "Replacement!2026");
     await prisma.loginAttempt.deleteMany({ where: { email: "auth-holder@test.local" } });

@@ -2,6 +2,8 @@ import NextAuth from "next-auth";
 import { NextResponse } from "next/server";
 import { authConfig } from "@/auth.config";
 import { adminEntryRedirect } from "@/lib/admin-gate";
+import { clientIp } from "@/lib/client-ip";
+import { edgeRateDecision } from "@/lib/edge-rate-limit";
 import { contentSecurityPolicy, createNonce, securityHeaders } from "@/lib/security-headers";
 
 const { auth } = NextAuth(authConfig);
@@ -20,6 +22,19 @@ function applySecurityHeaders(response: NextResponse, csp: string) {
 export default auth((request) => {
   const nonce = createNonce();
   const csp = contentSecurityPolicy(nonce);
+  if (
+    edgeRateDecision({
+      method: request.method,
+      pathname: request.nextUrl.pathname,
+      ip: clientIp(request),
+    }) === "limited"
+  ) {
+    const limited = new NextResponse("Too many attempts from this network. Wait a minute and try again.", {
+      status: 429,
+      headers: new Headers({ "Retry-After": "60" }),
+    });
+    return applySecurityHeaders(limited, csp);
+  }
   const destination = adminEntryRedirect(request.nextUrl.pathname, request.auth?.user?.role);
   if (destination) {
     const url = request.nextUrl.clone();

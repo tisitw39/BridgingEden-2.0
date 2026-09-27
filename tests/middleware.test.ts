@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { LOGIN_EDGE_LIMIT, resetEdgeRateLimits } from "@/lib/edge-rate-limit";
 
 vi.mock("next/server", () => {
   class NextResponse {
@@ -25,15 +26,17 @@ vi.mock("next-auth", () => ({
 }));
 
 type GateRequest = {
+  method: string;
   headers: Headers;
   auth: { user?: { role?: string } } | null;
   nextUrl: URL & { clone: () => URL };
 };
 
-function requestFor(pathname: string, role?: string): GateRequest {
+function requestFor(pathname: string, role?: string, method = "GET"): GateRequest {
   const nextUrl = new URL(`http://localhost:3000${pathname}`);
   const clone = () => new URL(nextUrl.toString());
   return {
+    method,
     headers: new Headers(),
     auth: role ? { user: { role } } : null,
     nextUrl: Object.assign(nextUrl, { clone }),
@@ -63,5 +66,18 @@ describe("admin middleware", () => {
     const admin = await gate(requestFor("/admin/ledger", "ADMIN"));
     expect(admin.status).toBe(200);
     expect(admin.headers.get("location")).toBeNull();
+  });
+
+  it("returns 429 when one address posts the login form too many times", async () => {
+    resetEdgeRateLimits();
+    const { default: middleware } = await import("@/middleware");
+    const gate = middleware as unknown as (request: GateRequest) => Promise<{ status: number; headers: Headers }>;
+    let status = 200;
+    for (let attempt = 0; attempt < LOGIN_EDGE_LIMIT + 1; attempt += 1) {
+      const response = await gate(requestFor("/login", undefined, "POST"));
+      status = response.status;
+    }
+    expect(status).toBe(429);
+    resetEdgeRateLimits();
   });
 });

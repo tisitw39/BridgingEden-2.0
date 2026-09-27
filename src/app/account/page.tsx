@@ -12,6 +12,7 @@ export default async function AccountPage({
 }) {
   const user = await requireUser();
   const flash = await searchParams;
+  const minPassword = user.role === "ADMIN" ? 12 : 8;
 
   return (
     <div className="mx-auto max-w-xl px-6 py-12 lg:px-8">
@@ -37,10 +38,11 @@ export default async function AccountPage({
             name="newPassword"
             type="password"
             autoComplete="new-password"
-            minLength={8}
+            minLength={minPassword}
             maxLength={200}
             required
           />
+          <span className="mt-1.5 block text-sm text-muted">Use at least {minPassword} characters.</span>
         </label>
         <label className="block">
           <span className="mb-1.5 block font-mono text-[11px] uppercase tracking-[0.14em] text-muted">
@@ -51,7 +53,7 @@ export default async function AccountPage({
             name="confirmPassword"
             type="password"
             autoComplete="new-password"
-            minLength={8}
+            minLength={minPassword}
             maxLength={200}
             required
           />

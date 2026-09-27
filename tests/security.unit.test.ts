@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { SESSION_MAX_AGE_SECONDS, sessionClaims } from "@/auth.config";
 import { clientIp } from "@/lib/authenticate";
+import { databaseUrl } from "@/lib/db-url";
+import { edgeRateDecision, resetEdgeRateLimits, VERIFY_EDGE_LIMIT } from "@/lib/edge-rate-limit";
+import { isPoolWaitTimeout, poolMaxWaitMs } from "@/lib/pool-wait";
 import { documentDownloadHeaders } from "@/lib/documents";
 import { adminEntryRedirect } from "@/lib/admin-gate";
 import { auditEmailHmac } from "@/lib/audit-email";
@@ -9,7 +12,7 @@ import { productionEnvError, startupEnvError } from "@/lib/env";
 import { errorText, noticeText } from "@/lib/flash";
 import { errorCode } from "@/lib/http";
 import { ledgerErrorFromDatabase } from "@/lib/ledger/service";
-import { weakPasswordMessage } from "@/lib/weak-passwords";
+import { commonPasswords, weakPasswordMessage } from "@/lib/weak-passwords";
 import { pdfText } from "@/lib/pdf-text";
 import { contentSecurityPolicy, securityHeaders } from "@/lib/security-headers";
 
@@ -177,10 +180,51 @@ describe("cron bearer", () => {
 
 describe("weak passwords", () => {
   it("flags an offline breach-list password and accepts the demo passwords", () => {
+    expect(commonPasswords().size).toBeGreaterThanOrEqual(10_000);
     expect(weakPasswordMessage("password123")).toMatch(/too common/);
     expect(weakPasswordMessage("PASSWORD123")).toMatch(/too common/);
     expect(weakPasswordMessage("EdenAdmin!2026")).toBeNull();
     expect(weakPasswordMessage("HolderDemo!2026")).toBeNull();
+  });
+});
+
+describe("pool wait", () => {
+  it("defaults to 5 seconds and stays inside 2 to 5 seconds", () => {
+    expect(poolMaxWaitMs({})).toBe(5_000);
+    expect(poolMaxWaitMs({ NODE_ENV: "production" })).toBe(5_000);
+    expect(poolMaxWaitMs({ LOGIN_POOL_MAX_WAIT_MS: "20000" })).toBe(5_000);
+    expect(poolMaxWaitMs({ LOGIN_POOL_MAX_WAIT_MS: "1000" })).toBe(2_000);
+    expect(poolMaxWaitMs({ LOGIN_POOL_MAX_WAIT_MS: "3000" })).toBe(3_000);
+    expect(isPoolWaitTimeout({ code: "P2028", message: "Unable to start a transaction in the given time." })).toBe(true);
+    expect(isPoolWaitTimeout({ code: "P2024", message: "Timed out fetching a new connection from the connection pool." })).toBe(true);
+    expect(isPoolWaitTimeout({ code: "P2028", message: "Transaction already closed" })).toBe(false);
+  });
+});
+
+describe("database url", () => {
+  it("adds a small connection limit when the url does not set one", () => {
+    const direct = "postgresql://bridgingeden_app:secret@127.0.0.1:5432/bridgingeden?schema=public";
+    expect(databaseUrl(direct, "production")).toContain("connection_limit=1");
+    expect(databaseUrl(direct, "test")).toContain("connection_limit=5");
+    expect(databaseUrl(`${direct}&connection_limit=3`, "production")).toBe(`${direct}&connection_limit=3`);
+  });
+});
+
+describe("edge rate limit", () => {
+  it("limits login posts and verification lookups per address", () => {
+    const store = new Map<string, number[]>();
+    resetEdgeRateLimits(store);
+    const now = 1_000_000;
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      expect(edgeRateDecision({ method: "POST", pathname: "/login", ip: "203.0.113.8" }, { now, store })).toBe("ok");
+    }
+    expect(edgeRateDecision({ method: "POST", pathname: "/login", ip: "203.0.113.8" }, { now, store })).toBe("limited");
+    expect(edgeRateDecision({ method: "GET", pathname: "/login", ip: "203.0.113.8" }, { now, store })).toBe("ok");
+    expect(edgeRateDecision({ method: "POST", pathname: "/login", ip: "203.0.113.9" }, { now, store })).toBe("ok");
+    for (let attempt = 0; attempt < VERIFY_EDGE_LIMIT; attempt += 1) {
+      expect(edgeRateDecision({ method: "GET", pathname: "/verify/abc", ip: "198.51.100.4" }, { now, store })).toBe("ok");
+    }
+    expect(edgeRateDecision({ method: "GET", pathname: "/verify/abc", ip: "198.51.100.4" }, { now, store })).toBe("limited");
   });
 });
 

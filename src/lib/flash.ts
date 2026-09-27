@@ -30,6 +30,7 @@ export const ERRORS = {
   password_wrong: "The current password is incorrect.",
   password_same: "Choose a different password.",
   password_weak: "That password is too common. Choose one that is not on a known breach list.",
+  password_short: "Admin passwords must be at least 12 characters.",
   form_invalid: "Check the form and try again.",
   text_too_long: "That text is too long.",
   insufficient: "That serial range is not fully held.",

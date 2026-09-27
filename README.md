@@ -6,7 +6,7 @@ Credits are whole tonnes of CO₂e. They are not yield-bearing. There is no exch
 
 ## Run it locally
 
-You need Node.js 20+ and PostgreSQL 16. Docker is the straightforward way to get Postgres:
+You need Node.js 22 (see `.nvmrc`) and PostgreSQL 16. Docker is the straightforward way to get Postgres:
 
 ```bash
 cp .env.example .env
@@ -43,7 +43,7 @@ psql "postgresql://SUPERUSER@127.0.0.1:5432/bridgingeden_test" \
 npx prisma migrate deploy
 ```
 
-`scripts/ci-bootstrap.sh` does the same steps with generated passwords and does not print them. Do not put those passwords in the SQL file.
+`scripts/ci-bootstrap.sh` does the same steps with generated passwords. On GitHub Actions it registers each role password, `AUTH_SECRET`, and `AUDIT_EMAIL_HMAC_KEY` with `::add-mask::` before writing them to `GITHUB_ENV`, so those values are redacted in the run log. Locally it writes them to `/tmp/ci-database.env` and does not print them. Do not put those passwords in the SQL file.
 
 The seed runs only when `ALLOW_DEMO_SEED=1`, `NODE_ENV` is not `production`, and the `users` table is empty. `.env.example` does not set the flag. `npm run setup` and `npm run db:seed` set it in a child process, which works in Windows cmd as well as a Unix shell. The login page shows the demo passwords only when Node is not in production.
 
@@ -59,7 +59,7 @@ The seed runs only when `ALLOW_DEMO_SEED=1`, `NODE_ENV` is not `production`, and
 
 `AUTH_SECRET` must be a unique value of at least 32 bytes. The placeholder in older examples is rejected, and an empty value is rejected. `AUTH_URL` must be an absolute `https` URL. `http` is rejected in production. The process refuses to serve production traffic without both. `trustHost` stays on so Auth.js can run behind a host header, and it is safe only because `AUTH_URL` is pinned.
 
-In production the server also refuses to start when `DATABASE_URL` is a superuser, a member of `bridgingeden_owner`, or a role that owns the ledger tables (`ledger_events`, `ledger_postings`, `issued_serial_ranges`, `audit_logs`, `credit_batches`, and `retirement_verifications`), and when any integrity trigger is not enabled (`pg_trigger.tgenabled` must be `O`). That list covers the balance, coverage, issuance, freeze, draft-only, contra-debit, role-guard, account-immutability, append-only, and truncate triggers, including `retirement_verifications_no_truncate`. The hourly cron runs the same trigger check before it sweeps. It also refuses to start without `AUDIT_EMAIL_HMAC_KEY`, a unique value of at least 32 bytes. When `VERCEL` is set it also refuses to start unless `CRON_SECRET` is at least 32 bytes. Unknown-email login audits store an HMAC of the address, not an unsalted hash and not the address. The running app therefore cannot be given `DIRECT_URL`. `pgcrypto` is not installed; tokens and password hashes are produced in the application.
+In production the server also refuses to start when `DATABASE_URL` is a superuser, a member of `bridgingeden_owner`, or a role that owns the ledger tables (`ledger_events`, `ledger_postings`, `issued_serial_ranges`, `audit_logs`, `credit_batches`, and `retirement_verifications`), and when any integrity trigger is not enabled (`pg_trigger.tgenabled` must be `O`). That list covers the balance, coverage, issuance, freeze, draft-only, contra-debit, role-guard, account-immutability, append-only, and truncate triggers, including `retirement_verifications_no_truncate`. The hourly cron runs the same trigger check before it sweeps. It also refuses to start without `AUDIT_EMAIL_HMAC_KEY`, a unique value of at least 32 bytes. When `VERCEL` is set it also refuses to start unless `CRON_SECRET` is at least 32 bytes. Unknown-email login audits store an HMAC of the address, not an unsalted hash and not the address. The running app therefore cannot be given `DIRECT_URL`. If `DATABASE_URL` has no `connection_limit`, production adds `connection_limit=1` and other environments add `connection_limit=5`, so one serverless instance cannot open a large pool of its own. `pgcrypto` is not installed; tokens and password hashes are produced in the application.
 
 Tests do not embed role passwords. Export `TEST_DATABASE_URL` (the app role, database `bridgingeden_test`) and `TEST_DIRECT_URL` (the owner role, same database) before `npm test`. The suite exits immediately if either is missing. Also export `AUDIT_EMAIL_HMAC_KEY` (at least 32 bytes).
 
@@ -169,9 +169,9 @@ Serial ranges travel as metadata. Reconciliation is one way: compare chain movem
 
 ## Deploying
 
-The app is a standard Next.js deployment. The running app, including Vercel, gets `DATABASE_URL` for `bridgingeden_app` and nothing else for the database. Do not set `DIRECT_URL` there. Prisma Client queries do not need it. Migrations run from CI or a release job that has `DIRECT_URL` for `bridgingeden_owner` and runs `prisma migrate deploy`. The Next.js build does not migrate. Create both roles with `docker/bootstrap-roles.sql`, passing real passwords in `-v owner_password` and `-v app_password`. Use a hosted Postgres that allows `btree_gist` (Neon, RDS, and current Supabase Postgres do). Do not run the seed against production.
+The app is a standard Next.js deployment. The running app, including Vercel, gets `DATABASE_URL` for `bridgingeden_app` and nothing else for the database. Point `DATABASE_URL` at a pooled host, for example the Neon pooler or the Supabase pooler (port 6543), and add `pgbouncer=true` plus a small `connection_limit` (1 is enough behind a pooler). Do not set `DIRECT_URL` there. Prisma Client queries do not need it. Migrations run from CI or a release job that has `DIRECT_URL` for `bridgingeden_owner` on the direct (non-pooled) host and runs `prisma migrate deploy`. The Next.js build does not migrate. Create both roles with `docker/bootstrap-roles.sql`, passing real passwords in `-v owner_password` and `-v app_password`. Use a hosted Postgres that allows `btree_gist` (Neon, RDS, and current Supabase Postgres do). Do not run the seed against production.
 
-Also set `AUTH_SECRET` (at least 32 bytes, not a placeholder), `AUDIT_EMAIL_HMAC_KEY` (at least 32 bytes), and `AUTH_URL` to the public `https` origin. Production startup rejects `http`. Sessions last eight hours and carry a token version. Changing a password increments that version, and signing out does too. Logout signs out every device that still holds the previous session. Setting or changing a password is refused when it matches an offline list of common or breached passwords. There is no call to an external breach service. Failed logins back off on the pair of email and IP. After 12 failures for that email, further attempts from every IP are limited. One address's failures do not lock the account out from a different IP before that ceiling. A limited attempt still runs the password compare, so a missing account and a backed-off account take the same path. Each rate-limited window writes one aggregated audit row, not one row per attempt. A failed login for an unknown address writes at most one audit row per IP per window, storing an HMAC of the address after it has been cut to 254 characters, not the address itself. Advisory locks on login and verification are non-blocking. A busy verification lock is reported separately from the attempt ceiling.
+Also set `AUTH_SECRET` (at least 32 bytes, not a placeholder), `AUDIT_EMAIL_HMAC_KEY` (at least 32 bytes), and `AUTH_URL` to the public `https` origin. Production startup rejects `http`. Sessions last eight hours and carry a token version. Changing a password increments that version, and signing out does too. Logout signs out every device that still holds the previous session. Setting or changing a password is refused when it matches a bundled list of about 100,000 common passwords (the xato top-100000 list). There is no call to an external breach service. Admin passwords must be at least 12 characters. Holder passwords must be at least 8. Failed logins back off on the pair of email and IP. After 12 failures for that email, further attempts from every IP are limited. One address's failures do not lock the account out from a different IP before that ceiling. A limited attempt still runs the password compare, so a missing account and a backed-off account take the same path. Each rate-limited window writes one aggregated audit row, not one row per attempt. A failed login for an unknown address writes at most one audit row per IP per window, storing an HMAC of the address after it has been cut to 254 characters, not the address itself. Advisory locks on login and verification are non-blocking. A busy verification lock is reported separately from the attempt ceiling. Login transactions wait at most 5 seconds for a pooled connection (`LOGIN_POOL_MAX_WAIT_MS` can lower that to 2 seconds). A pool timeout is treated as rate limited, so the request does not become a 500. Middleware also counts `POST /login`, `POST /api/auth/callback/*`, `POST /api/auth/signin/*`, and `/verify` per IP inside the instance (10 login posts and 30 verification requests per minute). That counter is not shared across Vercel isolates. The limit that holds across isolates is a Vercel Firewall rate-limit rule, which is a project setting rather than something this repo can enforce: one rule for `POST` on `/login` and `/api/auth/callback/*`, and one for `/verify`, each keyed by IP.
 
 Expired throttle rows are removed by `npm run db:sweep`. The server does not run that sweep on a timer. On Vercel, configure a Vercel Cron for `GET /api/cron/sweep` (see `vercel.json`, hourly). An hourly cron may need a paid Vercel plan. Hobby can limit cron jobs to once a day. Set `CRON_SECRET` to at least 32 bytes. When `VERCEL` is set, startup refuses a shorter value. Vercel sends `Authorization: Bearer $CRON_SECRET`. The route hashes both sides with SHA-256 and compares the digests with `timingSafeEqual`. It also refuses to sweep while any integrity trigger is disabled. A long-running host can cron `npm run db:sweep` instead. Do not rely on an in-process timer: serverless instances do not stay warm.
 
@@ -192,7 +192,8 @@ Auth.js in this version is `next-auth` 5 beta. That is a known dependency risk u
 ## Before production
 
 - Generate strong passwords for `bridgingeden_owner` and `bridgingeden_app`. Refuse any password equal to the role name.
-- On Vercel, set only `DATABASE_URL`, `AUTH_SECRET`, `AUDIT_EMAIL_HMAC_KEY`, `AUTH_URL`, and `CRON_SECRET`. Do not set `DIRECT_URL`.
+- On Vercel, set only `DATABASE_URL`, `AUTH_SECRET`, `AUDIT_EMAIL_HMAC_KEY`, `AUTH_URL`, and `CRON_SECRET`. `DATABASE_URL` is the pooled app-role URL (`pgbouncer=true`, small `connection_limit`). Do not set `DIRECT_URL`.
+- Add Vercel Firewall rate-limit rules for `POST /login` and `/verify`. The middleware counter does not span isolates.
 - Keep the owner credentials in a secrets manager, and alert on `DISABLE TRIGGER`.
 - Add CAPTCHA and alerting on failed logins.
 - Require TOTP for admin accounts.
@@ -205,7 +206,7 @@ Out of scope for this version: Solana, KYC providers, payments, live registry sy
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on pull requests and on pushes to `main`. The job starts Postgres 16, bootstraps the roles and both databases with `scripts/ci-bootstrap.sh`, applies migrations, then runs lint, typecheck, and the full test suite:
+`.github/workflows/ci.yml` runs on pull requests and on pushes to `main`. It checks out with pinned action SHAs, uses Node 22, and grants the workflow only `contents: read`. The job starts Postgres 16, bootstraps the roles and both databases with `scripts/ci-bootstrap.sh`, applies migrations, then runs lint, typecheck, the full test suite, and the production build:
 
 ```bash
 bash scripts/ci-bootstrap.sh
@@ -213,4 +214,5 @@ npx prisma migrate deploy
 npm run lint
 npm run typecheck
 npm test
+npm run build
 ```

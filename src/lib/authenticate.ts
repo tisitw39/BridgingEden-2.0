@@ -2,7 +2,11 @@ import { compare } from "bcryptjs";
 import { prisma } from "@/lib/db";
 import { tryAdvisoryLock } from "@/lib/advisory-lock";
 import { auditEmailHmac } from "@/lib/audit-email";
+import { clientIp } from "@/lib/client-ip";
+import { isPoolWaitTimeout, poolMaxWaitMs } from "@/lib/pool-wait";
 import { DUMMY_PASSWORD_HASH } from "@/lib/passwords";
+
+export { clientIp };
 
 const WINDOW_MS = 15 * 60 * 1000;
 const MAX_BACKOFF_MS = 15 * 60 * 1000;
@@ -22,29 +26,6 @@ export function backoffMs(failures: number): number {
 function waitRemaining(count: number, latest: Date | undefined, now: number): number {
   if (!latest || count <= 0) return 0;
   return Math.max(0, latest.getTime() + backoffMs(count) - now);
-}
-
-function rightmostHop(header: string | null): string | null {
-  if (!header) return null;
-  const parts = header.split(",").map((part) => part.trim()).filter(Boolean);
-  const last = parts[parts.length - 1];
-  if (!last) return null;
-  return last.slice(0, 64);
-}
-
-export function clientIp(
-  request: { headers: { get(name: string): string | null } },
-  env: { VERCEL?: string } = { VERCEL: process.env.VERCEL },
-): string {
-  if (env.VERCEL) {
-    const vercel = rightmostHop(request.headers.get("x-vercel-forwarded-for"));
-    if (vercel) return vercel;
-  }
-  return (
-    rightmostHop(request.headers.get("x-forwarded-for")) ||
-    rightmostHop(request.headers.get("x-real-ip")) ||
-    "unknown"
-  );
 }
 
 async function attemptState(
@@ -67,6 +48,7 @@ async function recordRateLimitedAudit(
   ip: string,
 ) {
   const entityId = user?.id ?? ip;
+  try {
   await prisma.$transaction(async (tx) => {
     const locked = await tryAdvisoryLock(tx, `login-audit:${entityId}`);
     if (!locked) return;
@@ -85,7 +67,10 @@ async function recordRateLimitedAudit(
           : { ip, emailHmac: auditEmailHmac(email) },
       },
     });
-  }, { timeout: 20_000, maxWait: 20_000 });
+  }, { timeout: poolMaxWaitMs(), maxWait: poolMaxWaitMs() });
+  } catch (error) {
+    if (!isPoolWaitTimeout(error)) throw error;
+  }
 }
 
 type UserSnapshot = {
@@ -102,7 +87,13 @@ export async function authenticate(emailRaw: string, password: string, ip: strin
   const safeIp = ip.slice(0, 64) || "unknown";
   if (!email || !password || password.length > 200) return null;
 
-  const decision = await prisma.$transaction(
+  let decision: {
+    limited: boolean;
+    since: Date;
+    user: UserSnapshot | null;
+  };
+  try {
+    decision = await prisma.$transaction(
     async (tx) => {
       const now = Date.now();
       const since = new Date(now - WINDOW_MS);
@@ -145,8 +136,13 @@ export async function authenticate(emailRaw: string, password: string, ip: strin
           : null,
       };
     },
-    { timeout: 20_000, maxWait: 20_000 },
+    { timeout: poolMaxWaitMs(), maxWait: poolMaxWaitMs() },
   );
+  } catch (error) {
+    if (!isPoolWaitTimeout(error)) throw error;
+    await compare(password, DUMMY_PASSWORD_HASH);
+    return null;
+  }
 
   // Always one bcrypt compare. A limited request and an unknown email take the same path.
   const matches = await compare(password, decision.user?.passwordHash ?? DUMMY_PASSWORD_HASH);
@@ -155,6 +151,7 @@ export async function authenticate(emailRaw: string, password: string, ip: strin
     return null;
   }
   if (!decision.user || !matches) {
+    try {
     if (decision.user) {
       await prisma.auditLog.create({
         data: {
@@ -185,18 +182,26 @@ export async function authenticate(emailRaw: string, password: string, ip: strin
       }
     }
     return null;
+    } catch (error) {
+      if (!isPoolWaitTimeout(error)) throw error;
+      return null;
+    }
   }
 
-  await prisma.loginAttempt.deleteMany({ where: { email: decision.user.email } });
-  await prisma.auditLog.create({
-    data: {
-      actorId: decision.user.id,
-      action: "auth.login",
-      entityType: "User",
-      entityId: decision.user.id,
-      detail: { email: decision.user.email.slice(0, 254), ip: safeIp },
-    },
-  });
+  try {
+    await prisma.loginAttempt.deleteMany({ where: { email: decision.user.email } });
+    await prisma.auditLog.create({
+      data: {
+        actorId: decision.user.id,
+        action: "auth.login",
+        entityType: "User",
+        entityId: decision.user.id,
+        detail: { email: decision.user.email.slice(0, 254), ip: safeIp },
+      },
+    });
+  } catch (error) {
+    if (!isPoolWaitTimeout(error)) throw error;
+  }
   return {
     id: decision.user.id,
     email: decision.user.email,
