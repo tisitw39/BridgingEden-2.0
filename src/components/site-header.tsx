@@ -48,7 +48,7 @@ export function SiteHeader({ user }: { user: HeaderUser }) {
         <div className="flex items-center gap-2">
           {user ? (
             <form action={signOutAction}>
-              <button className={linkIdle} type="submit">
+              <button className={linkIdle} type="submit" title="Signs out every device">
                 Sign out
               </button>
             </form>
@@ -82,7 +82,7 @@ export function SiteHeader({ user }: { user: HeaderUser }) {
             ))}
             {user ? (
               <form action={signOutAction}>
-                <button className={`${linkIdle} w-full text-left`} type="submit">
+                <button className={`${linkIdle} w-full text-left`} type="submit" title="Signs out every device">
                   Sign out
                 </button>
               </form>

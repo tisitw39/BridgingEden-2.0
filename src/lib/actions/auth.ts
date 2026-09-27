@@ -86,6 +86,9 @@ export async function changePasswordAction(formData: FormData) {
     if (error instanceof LedgerError && error.message.includes("different password")) {
       flashRedirect("/account", "error", "password_same");
     }
+    if (error instanceof LedgerError && error.message.includes("too common")) {
+      flashRedirect("/account", "error", "password_weak");
+    }
     flashRedirect("/account", "error", errorCode(error, "password_failed"));
   }
 }

@@ -1,10 +1,18 @@
 -- For an existing Postgres where the Docker init script did not run.
 -- Connect as a superuser. Passwords come from psql variables, not from this file.
 --
+-- This file does not create databases. The first run removes CREATEDB from
+-- bridgingeden_owner, so the owner cannot create them afterwards. The superuser
+-- creates the databases between the runs:
+--
 --   psql "postgresql://SUPERUSER@127.0.0.1:5432/postgres" \
 --     -v owner_password="$BRIDGINGEDEN_OWNER_PASSWORD" \
 --     -v app_password="$BRIDGINGEDEN_APP_PASSWORD" \
 --     -f docker/bootstrap-roles.sql
+--   psql "postgresql://SUPERUSER@127.0.0.1:5432/postgres" <<'SQL'
+--   CREATE DATABASE bridgingeden OWNER bridgingeden_owner;
+--   CREATE DATABASE bridgingeden_test OWNER bridgingeden_owner;
+--   SQL
 --   psql "postgresql://SUPERUSER@127.0.0.1:5432/bridgingeden" \
 --     -v owner_password="$BRIDGINGEDEN_OWNER_PASSWORD" \
 --     -v app_password="$BRIDGINGEDEN_APP_PASSWORD" \
@@ -14,6 +22,7 @@
 --     -v app_password="$BRIDGINGEDEN_APP_PASSWORD" \
 --     -f docker/bootstrap-roles.sql
 --
+-- scripts/ci-bootstrap.sh does those steps with generated passwords.
 -- Use long random passwords. Values equal to the role names are refused.
 -- After this script, bridgingeden_owner has neither CREATEDB nor CREATEROLE.
 

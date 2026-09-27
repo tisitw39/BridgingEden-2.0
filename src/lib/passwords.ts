@@ -2,6 +2,7 @@ import { compare, hash } from "bcryptjs";
 import { prisma } from "@/lib/db";
 import { LedgerError } from "@/lib/ledger/errors";
 import { LIMITS } from "@/lib/limits";
+import { weakPasswordMessage } from "@/lib/weak-passwords";
 
 export const BCRYPT_COST = 12;
 
@@ -28,6 +29,8 @@ export async function changePassword(userId: string, currentPassword: string, ne
   if (currentPassword === newPassword) {
     throw new LedgerError("Choose a different password.", "INVALID");
   }
+  const weak = weakPasswordMessage(newPassword);
+  if (weak) throw new LedgerError(weak, "INVALID");
   const passwordHash = await hash(newPassword, BCRYPT_COST);
   await prisma.user.update({
     where: { id: userId },

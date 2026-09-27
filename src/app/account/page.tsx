@@ -18,7 +18,7 @@ export default async function AccountPage({
       <PageTitle
         eyebrow="Account"
         title="Password"
-        lede={`${user.name} · ${user.email}. Change the password for this signed-in account.`}
+        lede={`${user.name} · ${user.email}. Changing the password, or signing out, ends the session on every device.`}
       />
       <Flash error={flash.error} notice={flash.notice} />
       <form action={changePasswordAction} className="space-y-4 rounded-2xl border border-line bg-white p-6">

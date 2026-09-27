@@ -5,6 +5,7 @@ const TRUNCATE_TRIGGERS = [
   ["issued_serial_ranges", "issued_serial_ranges_no_truncate"],
   ["ledger_postings", "ledger_postings_no_truncate"],
   ["ledger_events", "ledger_events_no_truncate"],
+  ["retirement_verifications", "retirement_verifications_no_truncate"],
 ] as const;
 
 export async function resetTransactionalData() {

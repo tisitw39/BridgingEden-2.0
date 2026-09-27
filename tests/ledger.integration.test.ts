@@ -926,6 +926,56 @@ describe("ledger database rules", () => {
     ).rejects.toThrow(/batch approver must be an admin/);
   });
 
+  it("rejects an issuance whose drafter is not an admin", async () => {
+    const project = await makeProject("DRAFTER");
+    const inventory = await prisma.account.findUniqueOrThrow({ where: { code: "INVENTORY" } });
+    const issuance = await prisma.account.findUniqueOrThrow({ where: { code: "ISSUANCE" } });
+    const batch = await draftBatch({
+      projectId: project.id,
+      vintageYear: 2024,
+      quantity: 2,
+      methodology: "Native Woodland Establishment",
+      actorId: holderId,
+    });
+    await expect(
+      prisma.$transaction(async (tx) => {
+        const event = await tx.ledgerEvent.create({
+          data: {
+            type: "ISSUANCE",
+            projectId: project.id,
+            vintageYear: 2024,
+            actorId: approverId,
+            batchId: batch.id,
+          },
+        });
+        for (const side of ["DEBIT", "CREDIT"] as const) {
+          await tx.ledgerPosting.create({
+            data: {
+              eventId: event.id,
+              accountId: side === "DEBIT" ? inventory.id : issuance.id,
+              side,
+              projectId: project.id,
+              vintageYear: 2024,
+              serialStart: 1,
+              serialEnd: 2,
+              quantity: 2,
+            },
+          });
+        }
+        await tx.creditBatch.update({
+          where: { id: batch.id },
+          data: {
+            status: "APPROVED",
+            serialStart: 1,
+            serialEnd: 2,
+            approvedById: approverId,
+            approvedAt: new Date(),
+          },
+        });
+      }),
+    ).rejects.toThrow(/drafter must be an admin/);
+  });
+
   it("rejects a contra credit or debit on a transfer", async () => {
     const project = await makeProject("CONTRA");
     const issuance = await prisma.account.findUniqueOrThrow({ where: { code: "ISSUANCE" } });

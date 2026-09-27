@@ -10,6 +10,15 @@ const LEDGER_CODES: Record<string, ErrorCode> = {
   NOT_FOUND: "not_found",
   INVALID: "invalid",
   INVARIANT: "invariant",
+  DRAFT_ONLY: "draft_only",
+  ISSUANCE_EVENT: "issuance_event",
+  CONTRA_CREDIT: "contra_credit",
+  ISSUANCE_ACTOR: "issuance_actor",
+  APPROVER_ROLE: "approver_role",
+  DRAFTER_ROLE: "drafter_role",
+  CONTRA_DEBIT: "contra_debit",
+  BATCH_MISMATCH: "batch_mismatch",
+  BATCH_FROZEN: "batch_frozen",
 };
 
 export function isRedirectError(error: unknown): boolean {

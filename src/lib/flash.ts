@@ -29,6 +29,7 @@ export const ERRORS = {
   password_mismatch: "The new password and confirmation do not match.",
   password_wrong: "The current password is incorrect.",
   password_same: "Choose a different password.",
+  password_weak: "That password is too common. Choose one that is not on a known breach list.",
   form_invalid: "Check the form and try again.",
   text_too_long: "That text is too long.",
   insufficient: "That serial range is not fully held.",
@@ -36,6 +37,15 @@ export const ERRORS = {
   not_found: "That record was not found.",
   invalid: "Those details were not accepted.",
   invariant: "The ledger rejected this entry.",
+  draft_only: "A new batch has to start as a draft.",
+  issuance_event: "Approving a batch has to record the issuance at the same time.",
+  contra_credit: "Credits can only be issued through an approved batch.",
+  issuance_actor: "The issuance must be recorded by the approving admin.",
+  approver_role: "The approver must be an admin.",
+  drafter_role: "The drafter must be an admin.",
+  contra_debit: "A contra account can only be debited when credits are issued.",
+  batch_mismatch: "The issued serials do not match the approved batch.",
+  batch_frozen: "That batch can no longer be changed.",
   already_used: "That value is already in use.",
 } as const;
 

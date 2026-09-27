@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { GET as sweepGet } from "@/app/api/cron/sweep/route";
 import { prisma } from "@/lib/db";
 import { disabledGuardTriggerProblem, runtimeRoleProblem } from "@/lib/db-role";
 import { ensureSystemAccounts } from "@/lib/ledger/service";
@@ -33,12 +34,23 @@ describe("runtime database role", () => {
     expect(await runtimeRoleProblem(prisma)).toBeNull();
     expect(await runtimeRoleProblem(ownerPrisma)).toMatch(/bridgingeden_owner|ledger tables/);
     expect(await disabledGuardTriggerProblem(prisma)).toBeNull();
+    const pgcrypto = await ownerPrisma.$queryRaw<{ extname: string }[]>`
+      SELECT extname FROM pg_extension WHERE extname = 'pgcrypto'
+    `;
+    expect(pgcrypto).toHaveLength(0);
   });
 
   it("reports an append-only trigger that is not enabled", async () => {
     await ownerPrisma.$executeRawUnsafe(`ALTER TABLE ledger_events DISABLE TRIGGER ledger_events_append_only`);
     try {
       expect(await disabledGuardTriggerProblem(prisma)).toMatch(/ledger_events_append_only/);
+      process.env.CRON_SECRET = "cron-test-secret-for-trigger-check";
+      const blocked = await sweepGet(
+        new Request("http://localhost/api/cron/sweep", {
+          headers: { authorization: "Bearer cron-test-secret-for-trigger-check" },
+        }),
+      );
+      expect(blocked.status).toBe(500);
     } finally {
       await ownerPrisma.$executeRawUnsafe(`ALTER TABLE ledger_events ENABLE TRIGGER ledger_events_append_only`);
     }

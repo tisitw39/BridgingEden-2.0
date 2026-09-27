@@ -80,15 +80,17 @@ export async function loadRetirementByToken(token: string): Promise<RetirementVe
   return toRecord(row.event);
 }
 
-export async function allowVerificationLookup(ip: string): Promise<boolean> {
+export type VerificationGate = "ok" | "limited" | "busy";
+
+export async function allowVerificationLookup(ip: string): Promise<VerificationGate> {
   const safeIp = ip.slice(0, 64) || "unknown";
   return prisma.$transaction(async (tx) => {
     const locked = await tryAdvisoryLock(tx, `verify:${safeIp}`);
-    if (!locked) return false;
+    if (!locked) return "busy";
     const since = new Date(Date.now() - VERIFY_WINDOW_MS);
     const count = await tx.verifyLookup.count({ where: { ip: safeIp, createdAt: { gte: since } } });
-    if (count >= VERIFY_LIMIT) return false;
+    if (count >= VERIFY_LIMIT) return "limited";
     await tx.verifyLookup.create({ data: { ip: safeIp } });
-    return true;
+    return "ok";
   });
 }

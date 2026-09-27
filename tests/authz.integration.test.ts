@@ -251,6 +251,17 @@ describe("authentication and authorisation", () => {
     expect(await prisma.loginAttempt.count({ where: { email: "auth-holder@test.local" } })).toBe(1);
   });
 
+  it("writes one audit row for a rate-limited window", async () => {
+    await prisma.loginAttempt.create({
+      data: { email: "auth-holder@test.local", ip: "203.0.113.9" },
+    });
+    expect(await authenticate("auth-holder@test.local", "HolderDemo!2026", "203.0.113.9")).toBeNull();
+    expect(await authenticate("auth-holder@test.local", "wrong-password", "203.0.113.9")).toBeNull();
+    expect(
+      await prisma.auditLog.count({ where: { action: "auth.login_rate_limited", entityId: holderId } }),
+    ).toBe(1);
+  });
+
   it("does not let one IP's failures lock the same account on another IP", async () => {
     await prisma.loginAttempt.createMany({
       data: Array.from({ length: 10 }, () => ({ email: "auth-holder@test.local", ip: "203.0.113.9" })),
@@ -295,6 +306,10 @@ describe("authentication and authorisation", () => {
     expect(after.tokenVersion).toBe(before.tokenVersion + 1);
   });
 
+  it("rejects a common password and then accepts a replacement", async () => {
+    await expect(changePassword(holderId, "HolderDemo!2026", "password123")).rejects.toThrow(/too common/);
+  });
+
   it("changes a password with one hash and then accepts only the new one", async () => {
     await changePassword(holderId, "HolderDemo!2026", "Replacement!2026");
     await prisma.loginAttempt.deleteMany({ where: { email: "auth-holder@test.local" } });
@@ -326,15 +341,15 @@ describe("authentication and authorisation", () => {
     await changePassword(holderId, "Replacement!2026", "HolderDemo!2026");
   });
 
-  it("stops verification lookups after the limit and treats a busy lock as limited", async () => {
+  it("stops verification lookups after the limit and treats a busy lock as busy", async () => {
     const ip = "198.51.100.41";
     for (let attempt = 0; attempt < 30; attempt += 1) {
-      expect(await allowVerificationLookup(ip)).toBe(true);
+      expect(await allowVerificationLookup(ip)).toBe("ok");
     }
-    expect(await allowVerificationLookup(ip)).toBe(false);
+    expect(await allowVerificationLookup(ip)).toBe("limited");
     const burstIp = "198.51.100.40";
     const results = await Promise.all(Array.from({ length: 40 }, () => allowVerificationLookup(burstIp)));
-    const allowed = results.filter(Boolean).length;
+    const allowed = results.filter((result) => result === "ok").length;
     expect(allowed).toBeGreaterThanOrEqual(1);
     expect(allowed).toBeLessThanOrEqual(30);
     expect(await prisma.verifyLookup.count({ where: { ip: burstIp } })).toBe(allowed);

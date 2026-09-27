@@ -12,6 +12,8 @@ export type ProductionEnv = {
   AUTH_SECRET?: string;
   AUTH_URL?: string;
   AUDIT_EMAIL_HMAC_KEY?: string;
+  VERCEL?: string;
+  CRON_SECRET?: string;
 };
 
 function secretError(name: string, value: string | undefined): string | null {
@@ -41,7 +43,16 @@ export function productionEnvError(env: ProductionEnv = process.env): string | n
   return null;
 }
 
+export function startupEnvError(env: ProductionEnv = process.env): string | null {
+  const production = productionEnvError(env);
+  if (production) return production;
+  if (env.VERCEL) {
+    return secretError("CRON_SECRET", env.CRON_SECRET);
+  }
+  return null;
+}
+
 export function assertProductionEnv(): void {
-  const message = productionEnvError();
+  const message = startupEnvError();
   if (message) throw new Error(message);
 }

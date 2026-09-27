@@ -4,8 +4,12 @@ import { clientIp } from "@/lib/authenticate";
 import { documentDownloadHeaders } from "@/lib/documents";
 import { adminEntryRedirect } from "@/lib/admin-gate";
 import { auditEmailHmac } from "@/lib/audit-email";
-import { productionEnvError } from "@/lib/env";
+import { cronBearerMatches } from "@/lib/cron-auth";
+import { productionEnvError, startupEnvError } from "@/lib/env";
 import { errorText, noticeText } from "@/lib/flash";
+import { errorCode } from "@/lib/http";
+import { ledgerErrorFromDatabase } from "@/lib/ledger/service";
+import { weakPasswordMessage } from "@/lib/weak-passwords";
 import { pdfText } from "@/lib/pdf-text";
 import { contentSecurityPolicy, securityHeaders } from "@/lib/security-headers";
 
@@ -142,6 +146,64 @@ describe("client ip", () => {
     });
     expect(clientIp(vercel, { VERCEL: "1" })).toBe("8.8.8.8");
     expect(clientIp(vercel, {})).toBe("1.1.1.1");
+  });
+});
+
+describe("vercel startup", () => {
+  const production = {
+    NODE_ENV: "production" as const,
+    AUTH_SECRET: "x".repeat(32),
+    AUTH_URL: "https://registry.example",
+    AUDIT_EMAIL_HMAC_KEY: "y".repeat(32),
+  };
+
+  it("requires a 32-byte CRON_SECRET only when VERCEL is set", () => {
+    expect(startupEnvError({ ...production, VERCEL: "1" })).toMatch(/CRON_SECRET/);
+    expect(startupEnvError({ ...production, VERCEL: "1", CRON_SECRET: "short" })).toMatch(/CRON_SECRET/);
+    expect(startupEnvError({ ...production, VERCEL: "1", CRON_SECRET: "c".repeat(32) })).toBeNull();
+    expect(startupEnvError(production)).toBeNull();
+  });
+});
+
+describe("cron bearer", () => {
+  it("compares SHA-256 digests and rejects an empty secret", () => {
+    expect(cronBearerMatches("", "Bearer ")).toBe(false);
+    expect(cronBearerMatches("cron-secret-value", "Bearer cron-secret-value")).toBe(true);
+    expect(cronBearerMatches("cron-secret-value", "Bearer other-secret-value")).toBe(false);
+    expect(cronBearerMatches("a", "Bearer aa")).toBe(false);
+    expect(cronBearerMatches("cron-secret-value", null)).toBe(false);
+  });
+});
+
+describe("weak passwords", () => {
+  it("flags an offline breach-list password and accepts the demo passwords", () => {
+    expect(weakPasswordMessage("password123")).toMatch(/too common/);
+    expect(weakPasswordMessage("PASSWORD123")).toMatch(/too common/);
+    expect(weakPasswordMessage("EdenAdmin!2026")).toBeNull();
+    expect(weakPasswordMessage("HolderDemo!2026")).toBeNull();
+  });
+});
+
+describe("ledger trigger messages", () => {
+  it("maps trigger text onto the flash the page shows", () => {
+    const cases = [
+      ["new batches must be an unapproved draft", "A new batch has to start as a draft."],
+      ["approved batch requires its issuance event", "Approving a batch has to record the issuance at the same time."],
+      ["a contra credit is only allowed on an issuance", "Credits can only be issued through an approved batch."],
+      ["issuance requires an approved credit batch", "Credits can only be issued through an approved batch."],
+      ["the issuance actor must be the batch approver", "The issuance must be recorded by the approving admin."],
+      ["the batch approver must be an admin", "The approver must be an admin."],
+      ["the batch drafter must be an admin", "The drafter must be an admin."],
+      ["contra accounts can only be debited by an issuance", "A contra account can only be debited when credits are issued."],
+      ["issuance postings do not match the approved batch", "The issued serials do not match the approved batch."],
+      ["credit batch is frozen", "That batch can no longer be changed."],
+    ] as const;
+    for (const [message, friendly] of cases) {
+      const error = ledgerErrorFromDatabase(message);
+      expect(error?.message).toBe(friendly);
+      expect(errorText(errorCode(error, "invariant"))).toBe(friendly);
+    }
+    expect(ledgerErrorFromDatabase("something else")).toBeNull();
   });
 });
 

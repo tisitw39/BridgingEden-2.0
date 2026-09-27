@@ -6,7 +6,7 @@ import { DUMMY_PASSWORD_HASH } from "@/lib/passwords";
 
 const WINDOW_MS = 15 * 60 * 1000;
 const MAX_BACKOFF_MS = 15 * 60 * 1000;
-export const EMAIL_WIDE_AFTER = 40;
+export const EMAIL_WIDE_AFTER = 12;
 export const IP_BACKOFF_AFTER = 30;
 const UNKNOWN_EMAIL = "unknown";
 
@@ -58,6 +58,34 @@ async function attemptState(
     orderBy: { createdAt: "desc" },
   });
   return { count: rows.length, latest: rows[0]?.createdAt };
+}
+
+async function recordRateLimitedAudit(
+  since: Date,
+  user: UserSnapshot | null,
+  email: string,
+  ip: string,
+) {
+  const entityId = user?.id ?? ip;
+  await prisma.$transaction(async (tx) => {
+    const locked = await tryAdvisoryLock(tx, `login-audit:${entityId}`);
+    if (!locked) return;
+    const already = await tx.auditLog.findFirst({
+      where: { action: "auth.login_rate_limited", entityId, createdAt: { gte: since } },
+    });
+    if (already) return;
+    await tx.auditLog.create({
+      data: {
+        actorId: user?.id,
+        action: "auth.login_rate_limited",
+        entityType: "User",
+        entityId,
+        detail: user
+          ? { email: user.email.slice(0, 254), ip }
+          : { ip, emailHmac: auditEmailHmac(email) },
+      },
+    });
+  });
 }
 
 type UserSnapshot = {
@@ -122,8 +150,12 @@ export async function authenticate(emailRaw: string, password: string, ip: strin
 
   // Always one bcrypt compare. A limited request and an unknown email take the same path.
   const matches = await compare(password, decision.user?.passwordHash ?? DUMMY_PASSWORD_HASH);
-  if (decision.limited || !decision.user || !matches) {
-    if (!decision.limited && decision.user) {
+  if (decision.limited) {
+    await recordRateLimitedAudit(decision.since, decision.user, email, safeIp);
+    return null;
+  }
+  if (!decision.user || !matches) {
+    if (decision.user) {
       await prisma.auditLog.create({
         data: {
           actorId: decision.user.id,
@@ -133,7 +165,7 @@ export async function authenticate(emailRaw: string, password: string, ip: strin
           detail: { email: decision.user.email.slice(0, 254), ip: safeIp },
         },
       });
-    } else if (!decision.limited) {
+    } else {
       const already = await prisma.auditLog.findFirst({
         where: {
           action: "auth.login_failed_unknown",

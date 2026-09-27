@@ -21,7 +21,29 @@ npm run dev
 
 The app uses two database roles. `DATABASE_URL` is `bridgingeden_app`, the only login the running app is allowed to use. It can insert ledger rows. It cannot update or delete them, and it cannot truncate them. On `credit_batches` it can update only the status, serial, and approval or rejection columns. `DIRECT_URL` is `bridgingeden_owner`. Prisma Migrate uses it, and the test suite uses it to reset rows. The owner is not a runtime credential: it can disable triggers, including the truncate guards. Neither role is a superuser. After bootstrap the owner also has neither `CREATEDB` nor `CREATEROLE`. Docker's `POSTGRES_USER` is a bootstrap superuser used only to create the roles and the `btree_gist` extension. Do not put that user, or the owner, in `DATABASE_URL`.
 
-Set `BRIDGINGEDEN_OWNER_PASSWORD` and `BRIDGINGEDEN_APP_PASSWORD` before the first `docker compose up`. `docker/init.sh` reads them and refuses a password that equals the role name. On a Postgres that was created before these roles existed, run `docker/bootstrap-roles.sql` as a superuser with `-v owner_password=... -v app_password=...` against `postgres`, `bridgingeden`, and `bridgingeden_test`, then migrate. Do not put those passwords in the SQL file.
+Set `BRIDGINGEDEN_OWNER_PASSWORD` and `BRIDGINGEDEN_APP_PASSWORD` before the first `docker compose up`. `docker/init.sh` reads them and refuses a password that equals the role name. On a Postgres that was created before these roles existed, run `docker/bootstrap-roles.sql` as a superuser with `-v owner_password=... -v app_password=...`. That file does not create the databases, and the first run removes `CREATEDB` from the owner, so the superuser has to create them in between:
+
+```bash
+psql "postgresql://SUPERUSER@127.0.0.1:5432/postgres" \
+  -v owner_password="$BRIDGINGEDEN_OWNER_PASSWORD" \
+  -v app_password="$BRIDGINGEDEN_APP_PASSWORD" \
+  -f docker/bootstrap-roles.sql
+psql "postgresql://SUPERUSER@127.0.0.1:5432/postgres" <<'SQL'
+CREATE DATABASE bridgingeden OWNER bridgingeden_owner;
+CREATE DATABASE bridgingeden_test OWNER bridgingeden_owner;
+SQL
+psql "postgresql://SUPERUSER@127.0.0.1:5432/bridgingeden" \
+  -v owner_password="$BRIDGINGEDEN_OWNER_PASSWORD" \
+  -v app_password="$BRIDGINGEDEN_APP_PASSWORD" \
+  -f docker/bootstrap-roles.sql
+psql "postgresql://SUPERUSER@127.0.0.1:5432/bridgingeden_test" \
+  -v owner_password="$BRIDGINGEDEN_OWNER_PASSWORD" \
+  -v app_password="$BRIDGINGEDEN_APP_PASSWORD" \
+  -f docker/bootstrap-roles.sql
+npx prisma migrate deploy
+```
+
+`scripts/ci-bootstrap.sh` does the same steps with generated passwords and does not print them. Do not put those passwords in the SQL file.
 
 The seed runs only when `ALLOW_DEMO_SEED=1`, `NODE_ENV` is not `production`, and the `users` table is empty. `.env.example` does not set the flag. `npm run setup` and `npm run db:seed` set it in a child process, which works in Windows cmd as well as a Unix shell. The login page shows the demo passwords only when Node is not in production.
 
@@ -37,7 +59,7 @@ The seed runs only when `ALLOW_DEMO_SEED=1`, `NODE_ENV` is not `production`, and
 
 `AUTH_SECRET` must be a unique value of at least 32 bytes. The placeholder in older examples is rejected, and an empty value is rejected. `AUTH_URL` must be an absolute `https` URL. `http` is rejected in production. The process refuses to serve production traffic without both. `trustHost` stays on so Auth.js can run behind a host header, and it is safe only because `AUTH_URL` is pinned.
 
-In production the server also refuses to start when `DATABASE_URL` is a superuser, a member of `bridgingeden_owner`, or a role that owns the ledger tables, and when any append-only or truncate-guard trigger is not enabled (`pg_trigger.tgenabled` must be `O`). It also refuses to start without `AUDIT_EMAIL_HMAC_KEY`, a unique value of at least 32 bytes. Unknown-email login audits store an HMAC of the address, not an unsalted hash and not the address. The running app therefore cannot be given `DIRECT_URL`.
+In production the server also refuses to start when `DATABASE_URL` is a superuser, a member of `bridgingeden_owner`, or a role that owns the ledger tables (`ledger_events`, `ledger_postings`, `issued_serial_ranges`, `audit_logs`, `credit_batches`, and `retirement_verifications`), and when any integrity trigger is not enabled (`pg_trigger.tgenabled` must be `O`). That list covers the balance, coverage, issuance, freeze, draft-only, contra-debit, role-guard, account-immutability, append-only, and truncate triggers, including `retirement_verifications_no_truncate`. The hourly cron runs the same trigger check before it sweeps. It also refuses to start without `AUDIT_EMAIL_HMAC_KEY`, a unique value of at least 32 bytes. When `VERCEL` is set it also refuses to start unless `CRON_SECRET` is at least 32 bytes. Unknown-email login audits store an HMAC of the address, not an unsalted hash and not the address. The running app therefore cannot be given `DIRECT_URL`. `pgcrypto` is not installed; tokens and password hashes are produced in the application.
 
 Tests do not embed role passwords. Export `TEST_DATABASE_URL` (the app role, database `bridgingeden_test`) and `TEST_DIRECT_URL` (the owner role, same database) before `npm test`. The suite exits immediately if either is missing. Also export `AUDIT_EMAIL_HMAC_KEY` (at least 32 bytes).
 
@@ -114,8 +136,8 @@ The migration, not only the application, refuses bad rows:
 - **No empty event.** An event without postings cannot commit.
 - **No edits.** `UPDATE` and `DELETE` on events, postings, issued ranges, and the audit log raise an exception. `TRUNCATE` is revoked from the runtime role and a `BEFORE TRUNCATE` trigger rejects it for everyone, including the owner, until that trigger is disabled. The owner can disable triggers; the runtime role cannot. That is why the owner URL stays out of the running app. The owner is not a superuser, so it also cannot set `session_replication_role = replica`.
 - **Immutable account identity.** `accounts.kind` and `accounts.code` cannot be updated. The runtime role may update an account's name, a user's password hash, and that user's token version, and nothing else on those rows. `users.role` cannot be changed by the runtime role, and only the owner role can insert an admin.
-- **Issuance is a batch.** A new `credit_batches` row can only be inserted as `DRAFT`, with the approval, rejection, and serial columns null. A deferred check rejects an `APPROVED` row unless the same transaction contains its `ISSUANCE` event. That event's actor must be the batch's approver, and that approver must be an admin. The contra credits must match the batch quantity and serial range. A contra credit on any other event type is rejected. A debit to a contra account is rejected unless the event is an issuance.
-- **Four eyes, in the database.** `credit_batches` has `CHECK (approved_by_id IS NULL OR approved_by_id <> drafted_by_id)`. A `BEFORE UPDATE` trigger freezes a batch that is no longer `DRAFT`, including for the table owner. The runtime role's `UPDATE` grant on that table is column-level: status, serial start, serial end, and the approval and rejection columns. Transfers and cancellations are not four-eyes.
+- **Issuance is a batch.** A new `credit_batches` row can only be inserted as `DRAFT`, with the approval, rejection, and serial columns null. A deferred check rejects an `APPROVED` row unless the same transaction contains its `ISSUANCE` event. That event's actor must be the batch's approver. The approver and the drafter must both be admins. The check takes `FOR SHARE` on those two `users` rows. The contra credits must match the batch quantity and serial range. A contra credit on any other event type is rejected. A debit to a contra account is rejected unless the event is an issuance.
+- **Four eyes, in the database.** `credit_batches` has `CHECK (approved_by_id IS NULL OR approved_by_id <> drafted_by_id)`. A `BEFORE UPDATE` trigger freezes a batch that is no longer `DRAFT`, including for the table owner. The runtime role's `UPDATE` grant on that table is column-level: status, serial start, serial end, and the approval and rejection columns. Transfers and cancellations are not four-eyes. The database cannot enforce four-eyes against a compromised application role: that shared login can write any two admin ids in one transaction. Binding an approval to a person would need signed approvals or a database identity per user.
 
 Approval is the moment serials are chosen: the next number after the project's highest issued serial, under a per-project lock. The approver must be a different person from the drafter, in the service and in the check constraint. The status update is conditional on the batch still being a draft, and reject takes the same per-project lock, so approve and reject cannot both commit. Drafting and rejecting a batch write an audit row and nothing in the ledger.
 
@@ -126,10 +148,10 @@ Tests in `tests/ranges.test.ts` cover range splits and derived balances without 
 ## Issuance, in the product
 
 1. An admin creates a project: name, location, methodology, standard or registry reference, description, and files.
-2. The admin drafts a batch: vintage year, quantity in tonnes, methodology.
+2. An admin drafts a batch: vintage year, quantity in tonnes, methodology. The database rejects the issuance if the drafter is not an admin.
 3. A different admin approves it. Both identities and timestamps are stored. The same person cannot approve their own draft.
 4. The admin transfers tonnes from inventory to a holder, by quantity or by an exact serial range.
-5. The holder retires tonnes they hold, naming a beneficiary and a reason, and downloads a PDF certificate. The certificate includes a QR code and a public verification URL. The URL carries a 128-bit token, not the event id. That page shows the project, vintage, serials, quantity, beneficiary, date, and status, and it is rate limited.
+5. The holder retires tonnes they hold, naming a beneficiary and a reason, and downloads a PDF certificate. The certificate includes a QR code and a public verification URL. The URL carries a 128-bit token, not the event id. That page shows the project, vintage, serials, quantity, beneficiary, date, and status, and it is rate limited. A busy verification lock shows its own message. It does not say the network has made too many attempts.
 
 Cancellation is the staff path for tonnes that should leave circulation without a retirement certificate.
 
@@ -149,9 +171,9 @@ Serial ranges travel as metadata. Reconciliation is one way: compare chain movem
 
 The app is a standard Next.js deployment. The running app, including Vercel, gets `DATABASE_URL` for `bridgingeden_app` and nothing else for the database. Do not set `DIRECT_URL` there. Prisma Client queries do not need it. Migrations run from CI or a release job that has `DIRECT_URL` for `bridgingeden_owner` and runs `prisma migrate deploy`. The Next.js build does not migrate. Create both roles with `docker/bootstrap-roles.sql`, passing real passwords in `-v owner_password` and `-v app_password`. Use a hosted Postgres that allows `btree_gist` (Neon, RDS, and current Supabase Postgres do). Do not run the seed against production.
 
-Also set `AUTH_SECRET` (at least 32 bytes, not a placeholder), `AUDIT_EMAIL_HMAC_KEY` (at least 32 bytes), and `AUTH_URL` to the public `https` origin. Production startup rejects `http`. Sessions last eight hours and carry a token version. Changing a password increments that version, and signing out does too, so the next request drops the old session. Failed logins back off on the pair of email and IP, with a looser ceiling across all IPs for that email, rather than a hard lockout. One address's failures do not lock the account out from a different IP until that ceiling. A limited attempt still runs the password compare, so a missing account and a backed-off account take the same path. A failed login for an unknown address writes at most one audit row per IP per window, storing an HMAC of the address after it has been cut to 254 characters, not the address itself. Advisory locks on login and verification are non-blocking: a busy lock is treated as rate limited.
+Also set `AUTH_SECRET` (at least 32 bytes, not a placeholder), `AUDIT_EMAIL_HMAC_KEY` (at least 32 bytes), and `AUTH_URL` to the public `https` origin. Production startup rejects `http`. Sessions last eight hours and carry a token version. Changing a password increments that version, and signing out does too. Logout signs out every device that still holds the previous session. Setting or changing a password is refused when it matches an offline list of common or breached passwords. There is no call to an external breach service. Failed logins back off on the pair of email and IP. After 12 failures for that email, further attempts from every IP are limited. One address's failures do not lock the account out from a different IP before that ceiling. A limited attempt still runs the password compare, so a missing account and a backed-off account take the same path. Each rate-limited window writes one aggregated audit row, not one row per attempt. A failed login for an unknown address writes at most one audit row per IP per window, storing an HMAC of the address after it has been cut to 254 characters, not the address itself. Advisory locks on login and verification are non-blocking. A busy verification lock is reported separately from the attempt ceiling.
 
-Expired throttle rows are removed by `npm run db:sweep`. The server does not run that sweep on a timer. On Vercel, configure a Vercel Cron for `GET /api/cron/sweep` (see `vercel.json`, hourly). Set `CRON_SECRET`. Vercel sends `Authorization: Bearer $CRON_SECRET`. The route rejects any other caller. A long-running host can cron `npm run db:sweep` instead. Do not rely on an in-process timer: serverless instances do not stay warm.
+Expired throttle rows are removed by `npm run db:sweep`. The server does not run that sweep on a timer. On Vercel, configure a Vercel Cron for `GET /api/cron/sweep` (see `vercel.json`, hourly). An hourly cron may need a paid Vercel plan. Hobby can limit cron jobs to once a day. Set `CRON_SECRET` to at least 32 bytes. When `VERCEL` is set, startup refuses a shorter value. Vercel sends `Authorization: Bearer $CRON_SECRET`. The route hashes both sides with SHA-256 and compares the digests with `timingSafeEqual`. It also refuses to sweep while any integrity trigger is disabled. A long-running host can cron `npm run db:sweep` instead. Do not rely on an in-process timer: serverless instances do not stay warm.
 
 Supporting documents are stored in Postgres and limited to two files of 1.5 MB so a server action stays under the platform body limit of about 4.5 MB. Larger project files would need direct-to-storage uploads. That path is not in this version.
 
@@ -163,8 +185,32 @@ Auth.js in this version is `next-auth` 5 beta. That is a known dependency risk u
 
 ## Known limitations
 
-- Transfers and cancellations are not four-eyes. One admin can move or cancel tonnes. Issuance approval is the step that requires a second admin.
+- Transfers and cancellations are not four-eyes. One admin can move or cancel tonnes. Issuance approval is the step that requires a second admin. Four-eyes on issuance does not hold if the application role itself is compromised.
 - There is no trusted-device cookie, CAPTCHA, or alerting on failed logins. Backoff slows guessing. It does not notify staff.
 - The major-version `npm audit` upgrades above are not applied in this version.
 
+## Before production
+
+- Generate strong passwords for `bridgingeden_owner` and `bridgingeden_app`. Refuse any password equal to the role name.
+- On Vercel, set only `DATABASE_URL`, `AUTH_SECRET`, `AUDIT_EMAIL_HMAC_KEY`, `AUTH_URL`, and `CRON_SECRET`. Do not set `DIRECT_URL`.
+- Keep the owner credentials in a secrets manager, and alert on `DISABLE TRIGGER`.
+- Add CAPTCHA and alerting on failed logins.
+- Require TOTP for admin accounts.
+- Decide whether transfers and cancellations should be four-eyes as well.
+- Move off `next-auth` 5 beta onto a stable release, and take the Next.js 16 upgrade.
+- Configure backups and point-in-time recovery.
+- Run a penetration test against staging.
+
 Out of scope for this version: Solana, KYC providers, payments, live registry sync, and yield of any kind.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on pull requests and on pushes to `main`. The job starts Postgres 16, bootstraps the roles and both databases with `scripts/ci-bootstrap.sh`, applies migrations, then runs lint, typecheck, and the full test suite:
+
+```bash
+bash scripts/ci-bootstrap.sh
+npx prisma migrate deploy
+npm run lint
+npm run typecheck
+npm test
+```

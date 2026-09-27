@@ -50,28 +50,54 @@ export async function ensureHolderAccount(
   });
 }
 
+export function ledgerErrorFromDatabase(message: string): LedgerError | null {
+  if (message.includes("uncovered credit")) {
+    return new LedgerError("That serial range is not fully held.", "INSUFFICIENT");
+  }
+  if (message.includes("issued_serials_do_not_overlap") || message.includes("exclusion constraint")) {
+    return new LedgerError("Those serial numbers overlap an existing issuance.", "OVERLAP");
+  }
+  if (message.includes("unapproved draft")) {
+    return new LedgerError("A new batch has to start as a draft.", "DRAFT_ONLY");
+  }
+  if (message.includes("requires its issuance event")) {
+    return new LedgerError("Approving a batch has to record the issuance at the same time.", "ISSUANCE_EVENT");
+  }
+  if (message.includes("contra credit is only allowed on an issuance") || message.includes("approved credit batch")) {
+    return new LedgerError("Credits can only be issued through an approved batch.", "CONTRA_CREDIT");
+  }
+  if (message.includes("issuance actor must be the batch approver")) {
+    return new LedgerError("The issuance must be recorded by the approving admin.", "ISSUANCE_ACTOR");
+  }
+  if (message.includes("batch approver must be an admin")) {
+    return new LedgerError("The approver must be an admin.", "APPROVER_ROLE");
+  }
+  if (message.includes("batch drafter must be an admin")) {
+    return new LedgerError("The drafter must be an admin.", "DRAFTER_ROLE");
+  }
+  if (message.includes("only be debited by an issuance")) {
+    return new LedgerError("A contra account can only be debited when credits are issued.", "CONTRA_DEBIT");
+  }
+  if (message.includes("do not match the approved batch")) {
+    return new LedgerError("The issued serials do not match the approved batch.", "BATCH_MISMATCH");
+  }
+  if (message.includes("is frozen")) {
+    return new LedgerError("That batch can no longer be changed.", "BATCH_FROZEN");
+  }
+  if (message.includes("credit_batches_four_eyes")) {
+    return new LedgerError("A different admin has to approve this draft.", "INVALID");
+  }
+  if (message.includes("append-only") || message.includes("unbalanced ledger event")) {
+    return new LedgerError("The ledger rejected this entry.", "INVARIANT");
+  }
+  return null;
+}
+
 function rethrow(error: unknown): never {
   if (error instanceof LedgerError) throw error;
   const message = error instanceof Error ? error.message : String(error);
-  if (message.includes("uncovered credit")) {
-    throw new LedgerError("That serial range is not fully held.", "INSUFFICIENT");
-  }
-  if (
-    message.includes("issued_serials_do_not_overlap") ||
-    message.includes("exclusion constraint")
-  ) {
-    throw new LedgerError("Those serial numbers overlap an existing issuance.", "OVERLAP");
-  }
-  if (
-    message.includes("append-only") ||
-    message.includes("unbalanced ledger event") ||
-    message.includes("approved credit batch") ||
-    message.includes("do not match the approved batch") ||
-    message.includes("is frozen") ||
-    message.includes("credit_batches_four_eyes")
-  ) {
-    throw new LedgerError("The ledger rejected this entry.", "INVARIANT");
-  }
+  const mapped = ledgerErrorFromDatabase(message);
+  if (mapped) throw mapped;
   throw error;
 }
 

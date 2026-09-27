@@ -6,6 +6,7 @@ import { prisma } from "@/lib/db";
 import { errorCode, flashRedirect, isRedirectError } from "@/lib/http";
 import { LIMITS } from "@/lib/limits";
 import { BCRYPT_COST } from "@/lib/passwords";
+import { weakPasswordMessage } from "@/lib/weak-passwords";
 import { ensureHolderAccount, cancelCredits, transferCredits } from "@/lib/ledger/service";
 import { requireAdmin } from "@/lib/session";
 
@@ -36,6 +37,9 @@ export async function createHolderAction(formData: FormData) {
   });
   if (!parsed.success) {
     flashRedirect("/admin/holdings", "error", errorCode(parsed.error, "form_invalid"));
+  }
+  if (weakPasswordMessage(parsed.data.password)) {
+    flashRedirect("/admin/holdings", "error", "password_weak");
   }
   try {
     const passwordHash = await hash(parsed.data.password, BCRYPT_COST);
