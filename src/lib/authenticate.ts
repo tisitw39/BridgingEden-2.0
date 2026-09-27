@@ -85,7 +85,7 @@ async function recordRateLimitedAudit(
           : { ip, emailHmac: auditEmailHmac(email) },
       },
     });
-  });
+  }, { timeout: 20_000, maxWait: 20_000 });
 }
 
 type UserSnapshot = {
@@ -145,7 +145,7 @@ export async function authenticate(emailRaw: string, password: string, ip: strin
           : null,
       };
     },
-    { timeout: 5_000, maxWait: 2_000 },
+    { timeout: 20_000, maxWait: 20_000 },
   );
 
   // Always one bcrypt compare. A limited request and an unknown email take the same path.

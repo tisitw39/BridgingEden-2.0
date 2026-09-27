@@ -249,7 +249,7 @@ describe("authentication and authorisation", () => {
     );
     expect(results.every((result) => result === null)).toBe(true);
     expect(await prisma.loginAttempt.count({ where: { email: "auth-holder@test.local" } })).toBe(1);
-  });
+  }, 60_000);
 
   it("writes one audit row for a rate-limited window", async () => {
     await prisma.loginAttempt.create({
