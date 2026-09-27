@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 47 60% 97%;
+  --foreground: 147 15% 14%;
+  --border: 122 38% 84%;
+  --card: 0 0% 100%;
+  --primary: 125 55% 24%;
+  --primary-foreground: 47 60% 97%;
+  --secondary: 120 33% 96%;
+  --secondary-foreground: 125 55% 18%;
+  --muted: 120 20% 95%;
+  --muted-foreground: 104 27% 39%;
+  --accent: 123 43% 39%;
+  --destructive: 0 72% 42%;
+  --radius: 0.5rem;
+  color-scheme: light;
+}
+
+body {
+  background: #fcfaf3;
+  color: #1e2923;
+}
+
+::selection {
+  background: #a5d6a7;
+  color: #1e2923;
+}
+
+input,
+textarea,
+select {
+  accent-color: #1c5f21;
+}

@@ -1,0 +1,57 @@
+import { compare, hash } from "bcryptjs";
+import { prisma } from "@/lib/db";
+import { LedgerError } from "@/lib/ledger/errors";
+import { LIMITS } from "@/lib/limits";
+import { weakPasswordMessage } from "@/lib/weak-passwords";
+
+export const BCRYPT_COST = 12;
+
+// Cost-12 hash of a string that is not a password. Compared when the email is unknown
+// so the response time does not reveal whether the account exists.
+export const DUMMY_PASSWORD_HASH =
+  "$2b$12$9nX.rYI4iaLytIRJnl2/ded7ZkJmea3adighS4Sw85aTnqHXuiEsm";
+
+export async function revokeSessions(userId: string) {
+  await prisma.user.update({
+    where: { id: userId },
+    data: { tokenVersion: { increment: 1 } },
+  });
+}
+
+export const ADMIN_PASSWORD_MIN = 12;
+export const HOLDER_PASSWORD_MIN = 8;
+
+export async function changePassword(userId: string, currentPassword: string, newPassword: string) {
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user) throw new LedgerError("Account not found.", "NOT_FOUND");
+  const min = user.role === "ADMIN" ? ADMIN_PASSWORD_MIN : HOLDER_PASSWORD_MIN;
+  if (newPassword.length < min || newPassword.length > LIMITS.password) {
+    throw new LedgerError(
+      user.role === "ADMIN"
+        ? "Admin passwords must be at least 12 characters."
+        : "Use a password of 8 to 200 characters.",
+      "INVALID",
+    );
+  }
+  const matches = await compare(currentPassword, user.passwordHash);
+  if (!matches) throw new LedgerError("The current password is incorrect.", "INVALID");
+  if (currentPassword === newPassword) {
+    throw new LedgerError("Choose a different password.", "INVALID");
+  }
+  const weak = weakPasswordMessage(newPassword);
+  if (weak) throw new LedgerError(weak, "INVALID");
+  const passwordHash = await hash(newPassword, BCRYPT_COST);
+  await prisma.user.update({
+    where: { id: userId },
+    data: { passwordHash, tokenVersion: { increment: 1 } },
+  });
+  await prisma.auditLog.create({
+    data: {
+      actorId: userId,
+      action: "auth.password_changed",
+      entityType: "User",
+      entityId: userId,
+      detail: {},
+    },
+  });
+}
